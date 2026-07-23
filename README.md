@@ -6,10 +6,11 @@ phone opportunistically pushes what it collected to the central Amino Farms
 server (aminofarms.replit.app) whenever it has a connection, instead of
 requiring a manual export.
 
-**What it does:** enroll a worker (name, Aadhar number, a face photo), punch
-attendance by face recognition, see a calendar of who was present/absent,
-and sync it all to Amino Farms' Payroll > Wages page, where the daily wage
-rate is set and the wage settlement report is generated.
+**What it does:** enroll a worker (name, Aadhar number, a face photo, and a
+role like "Mason" or "Helper"), punch attendance by face recognition, see a
+calendar of who was present/absent, and sync it all to Amino Farms' Payroll
+> Wages page, where the daily rate *per role* is configured and the wage
+settlement report (present days x that role's rate) is generated.
 
 **What it deliberately does not do:** shifts, holidays, leave, statutory
 deductions. If you need those, use the full Amino Farms/Niko payroll module
@@ -34,9 +35,11 @@ instead — this app is a narrow sibling to it, not a replacement.
   gets a `syncedAt` timestamp once successfully pushed. Unsynced records are
   retried on a schedule (see below) plus opportunistically: on `online`,
   on app foreground, and right after every punch/enrollment/correction.
-  One-way only (device → server) — see the "Ownership model" section below
-  for why, and `server/routes/wages.ts` in the Amino Farms repo for the
-  receiving end.
+  Device → server for identity and attendance, with one exception: the
+  current list of role *names* (never rates) rides back on every sync
+  response and gets cached locally, so the enrollment form's role field can
+  suggest existing roles. See the "Ownership model" section below and
+  `server/routes/wages.ts` in the Amino Farms repo for the receiving end.
 - **Sync cadence**: every 10 seconds during 7:45–8:30 AM and 4:45–5:30 PM
   (device-local time — shift start/end rush windows, when near-live
   visibility matters most), every 5 minutes otherwise. Adjustable in
@@ -53,15 +56,21 @@ instead — this app is a narrow sibling to it, not a replacement.
 
 | Data | Owner | Direction |
 |---|---|---|
-| Worker name, Aadhar, photo, face descriptor | This device (enrollment needs the camera) | Device → server |
-| Daily wage | Amino Farms Wages page | Never sent to the device |
+| Worker name, Aadhar, photo, face descriptor, role | This device (enrollment needs the camera) | Device → server |
+| Role names (list, for the enrollment picker) | Amino Farms Wages > Roles | Server → device (piggybacked on sync response) |
+| Daily rate per role | Amino Farms Wages > Roles | Never sent to the device |
 | Punches, day overrides | This device | Device → server |
 
-Sync is one-way and additive/idempotent: the server upserts workers by their
-device-generated id but **never touches `dailyWage`** on an incoming sync —
-that field is exclusively edited from the Wages page. Punches are
-insert-if-new; overrides are upsert-by-id so a correction made offline
-overwrites cleanly once synced.
+The split is "role on device, money on server": HR assigns each worker's
+role during on-device enrollment (who does what), but the actual ₹/day rate
+for that role is configured centrally in Amino Farms (what it pays) — so a
+rate change applies to everyone in that role without touching the device.
+Sync is additive/idempotent: the server upserts workers by their
+device-generated id but **never writes a rate** on an incoming sync — rates
+are exclusively edited from the Roles tab. Punches are insert-if-new;
+overrides are upsert-by-id so a correction made offline overwrites cleanly
+once synced. If a worker's role doesn't match any configured role name yet,
+the Wages page flags them so HR notices before running payroll.
 
 ## Setting up sync on a device
 
@@ -143,9 +152,10 @@ happy to make that change if needed.
 ## Data model
 
 ```
-employees: id, name, aadharNumber, photoDataUrl, faceDescriptor, isActive, syncedAt?
+employees: id, name, aadharNumber, photoDataUrl, faceDescriptor, role, isActive, syncedAt?
 punches:   id, employeeId, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
 overrides: key ("<employeeId>|<date>"), employeeId, date, status (P/A), note, setAt, syncedAt?
+meta:      key "cached-roles" — role names last seen from the server (enrollment suggestions only)
 ```
 
 That's the whole schema — see `src/types.ts` and `src/lib/attendance.ts`.

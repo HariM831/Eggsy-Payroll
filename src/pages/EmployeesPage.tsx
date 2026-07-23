@@ -35,7 +35,10 @@ export default function EmployeesPage({ onAdd, onEdit }: { onAdd: () => void; on
               <img src={e.photoDataUrl} className="w-12 h-12 rounded-full object-cover flex-shrink-0" />
               <div className="flex-1 min-w-0" onClick={() => onEdit(e.id)}>
                 <p className="font-medium truncate">{e.name}</p>
-                <p className="text-xs text-gray-500">Aadhar {e.aadharNumber}</p>
+                <p className="text-xs text-gray-500">
+                  Aadhar {e.aadharNumber}
+                  {e.role ? ` · ${e.role}` : ""}
+                </p>
               </div>
               <button
                 onClick={async () => {

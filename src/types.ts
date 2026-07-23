@@ -5,6 +5,8 @@ export interface Employee {
   photoDataUrl: string;
   /** Face embedding captured from the enrollment photo — used to match punches. */
   faceDescriptor: number[];
+  /** Work-type (e.g. "Mason", "Helper") — the daily rate for it is set centrally in Amino Farms, never here. */
+  role: string | null;
   isActive: boolean;
   createdAt: number;
   /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */

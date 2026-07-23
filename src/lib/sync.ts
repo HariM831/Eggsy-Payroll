@@ -3,11 +3,13 @@
 // module just pushes whatever accumulated locally whenever a connection
 // happens to be available, so HR doesn't have to manually export/share data.
 //
-// One-way: device -> server. The device is the source of truth for worker
-// identity (name/aadhar/photo/face) and all attendance data. The server
-// never pushes anything back — see server/routes/wages.ts on the Amino Farms
-// side for the receiving end and the ownership-split rationale (daily wage
-// is server-owned and never sent here).
+// One-way: device -> server for identity and attendance. The device is the
+// source of truth for worker identity (name/aadhar/photo/face/role) and all
+// attendance data. The one exception is role *names*: the server owns the
+// rate card (Amino Farms Wages > Roles) and piggybacks the current list of
+// role names on every sync response, purely so the enrollment form can
+// suggest existing roles — the rate itself is never sent here. See
+// server/routes/wages.ts on the Amino Farms side for the receiving end.
 import { getAll, get, put } from "./db";
 import type { Employee, Punch } from "../types";
 import type { DayOverride } from "./attendance";
@@ -49,6 +51,21 @@ export async function getSyncStatus(): Promise<SyncStatus> {
 async function setSyncStatus(patch: Partial<SyncStatus>): Promise<void> {
   const current = await getSyncStatus();
   await put<SyncStatus>("meta", { ...current, ...patch, key: "sync-status" });
+}
+
+interface CachedRoles {
+  key: "cached-roles";
+  roles: string[];
+}
+
+/** Role names last seen from the server, for the enrollment form's suggestions. */
+export async function getCachedRoles(): Promise<string[]> {
+  const cached = await get<CachedRoles>("meta", "cached-roles");
+  return cached?.roles ?? [];
+}
+
+async function setCachedRoles(roles: string[]): Promise<void> {
+  await put<CachedRoles>("meta", { key: "cached-roles", roles });
 }
 
 async function getUnsyncedEmployees(): Promise<Employee[]> {
@@ -94,7 +111,9 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
       getUnsyncedOverrides(),
     ]);
 
-    if (employees.length === 0 && punches.length === 0 && overrides.length === 0) {
+    const nothingPending = employees.length === 0 && punches.length === 0 && overrides.length === 0;
+    const rolesCached = (await getCachedRoles()).length > 0;
+    if (nothingPending && rolesCached) {
       await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
       return { ok: true, synced: 0 };
     }
@@ -106,6 +125,7 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
         aadharNumber: e.aadharNumber,
         photoDataUrl: e.photoDataUrl,
         faceDescriptor: e.faceDescriptor,
+        role: e.role,
         isActive: e.isActive,
       })),
       punches: punches.map((p) => ({
@@ -136,6 +156,11 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`Server responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    }
+
+    const responseBody = await res.json().catch(() => null);
+    if (Array.isArray(responseBody?.roles)) {
+      await setCachedRoles(responseBody.roles);
     }
 
     const now = Date.now();
