@@ -20,8 +20,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # No package-lock.json is committed (this repo was scaffolded without a
+      # Node environment available to generate one), so `npm ci` can't run —
+      # it requires an existing lockfile. Once a lockfile is committed here,
+      # switch this to `npm ci` for reproducible, faster installs.
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build web app (also copies face-recognition models into the bundle)
         run: npm run build
