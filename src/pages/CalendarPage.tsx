@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { listEmployees } from "../lib/employees";
 import { resolveMonth, setDayOverride, resolveDay } from "../lib/attendance";
+import { syncSoon } from "../lib/sync";
 import type { Employee, DayResolution } from "../types";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -51,6 +52,7 @@ export default function CalendarPage() {
     await setDayOverride(employeeId, dateStr(selectedDay), status, "Manually corrected");
     const updated = await resolveDay(employeeId, dateStr(selectedDay));
     setDays((d) => ({ ...d, [selectedDay]: updated }));
+    syncSoon();
   }
 
   return (

@@ -17,7 +17,6 @@ export async function createEmployee(input: {
   aadharNumber: string;
   photoDataUrl: string;
   faceDescriptor: number[];
-  dailyWage: number;
 }): Promise<Employee> {
   const employee: Employee = {
     id: newId(),
@@ -25,9 +24,9 @@ export async function createEmployee(input: {
     aadharNumber: input.aadharNumber.trim(),
     photoDataUrl: input.photoDataUrl,
     faceDescriptor: input.faceDescriptor,
-    dailyWage: input.dailyWage,
     isActive: true,
     createdAt: Date.now(),
+    // left unset — the outbox (lib/sync.ts) treats a missing syncedAt as pending
   };
   await put("employees", employee);
   return employee;

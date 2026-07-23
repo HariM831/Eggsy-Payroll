@@ -1,29 +1,78 @@
 # Niko-Payroll
 
-A small, fully offline attendance app for Android. No server, no internet
-connection required at any point — everything lives on the phone.
+An offline-first face-punch attendance app for Android. Punching, worker
+enrollment, and viewing attendance all work with zero connectivity — the
+phone opportunistically pushes what it collected to the central Amino Farms
+server (aminofarms.replit.app) whenever it has a connection, instead of
+requiring a manual export.
 
-**What it does:** enroll an employee (name, Aadhar number, a face photo,
-daily wage), punch attendance by face recognition, see a calendar of who was
-present/absent, and generate a wage settlement report for a date range.
+**What it does:** enroll a worker (name, Aadhar number, a face photo), punch
+attendance by face recognition, see a calendar of who was present/absent,
+and sync it all to Amino Farms' Payroll > Wages page, where the daily wage
+rate is set and the wage settlement report is generated.
 
 **What it deliberately does not do:** shifts, holidays, leave, statutory
-deductions, multi-device sync. If you need those, use the full Amino
-Farms/Niko payroll module instead — this app is a narrow, offline-first
-sibling to it, not a replacement.
+deductions. If you need those, use the full Amino Farms/Niko payroll module
+instead — this app is a narrow sibling to it, not a replacement.
+
+## Who can do what
+
+- **Punch is always open** — no PIN, anyone can walk up and punch. That's
+  deliberate: attendance capture shouldn't require unlocking anything.
+- **Employees, Calendar, and Settings are PIN-locked.** Enrolling workers,
+  correcting attendance history, and sync configuration all require the
+  device PIN (`src/lib/pin.ts`) — set once on first launch.
 
 ## How it works
 
-- **Storage**: IndexedDB, entirely on-device (`src/lib/db.ts`). Two stores:
-  `employees` and `punches`, plus small `overrides`/`meta` stores. Nothing
-  leaves the phone unless you explicitly export the wage report.
+- **Storage**: IndexedDB, entirely on-device (`src/lib/db.ts`). Stores:
+  `employees`, `punches`, `overrides` (manual day corrections), `meta`
+  (PIN, sync config/status).
 - **Face recognition**: [`@vladmandic/human`](https://github.com/vladmandic/human),
-  bundled locally (see `scripts/copy-face-models.mjs`) — no CDN calls, unlike
-  the reference implementation this was ported from.
-- **Auth**: a single on-device PIN (`src/lib/pin.ts`), no accounts, no
-  server session.
+  bundled locally (see `scripts/copy-face-models.mjs`) — no CDN calls.
+- **Sync**: `src/lib/sync.ts` is an outbox — every employee/punch/override
+  gets a `syncedAt` timestamp once successfully pushed. Unsynced records are
+  retried on a schedule (see below) plus opportunistically: on `online`,
+  on app foreground, and right after every punch/enrollment/correction.
+  One-way only (device → server) — see the "Ownership model" section below
+  for why, and `server/routes/wages.ts` in the Amino Farms repo for the
+  receiving end.
+- **Sync cadence**: every 10 seconds during 7:45–8:30 AM and 4:45–5:30 PM
+  (device-local time — shift start/end rush windows, when near-live
+  visibility matters most), every 5 minutes otherwise. Adjustable in
+  `src/lib/sync.ts` (`RUSH_WINDOWS`, `RUSH_INTERVAL_MS`, `IDLE_INTERVAL_MS`).
+- **Auth**: a single on-device PIN, no accounts, no server session — separate
+  from the device *sync* token (see below), which authenticates the phone to
+  the server, not a person to the phone.
 - **Packaging**: [Capacitor](https://capacitorjs.com/) wraps the React/Vite
-  web build into an Android WebView app.
+  web build into an Android WebView app, with `CapacitorHttp` enabled so the
+  cross-origin sync requests to aminofarms.replit.app bypass WebView CORS
+  restrictions (same approach the main Amino Farms Android build uses).
+
+## Ownership model — what data lives where
+
+| Data | Owner | Direction |
+|---|---|---|
+| Worker name, Aadhar, photo, face descriptor | This device (enrollment needs the camera) | Device → server |
+| Daily wage | Amino Farms Wages page | Never sent to the device |
+| Punches, day overrides | This device | Device → server |
+
+Sync is one-way and additive/idempotent: the server upserts workers by their
+device-generated id but **never touches `dailyWage`** on an incoming sync —
+that field is exclusively edited from the Wages page. Punches are
+insert-if-new; overrides are upsert-by-id so a correction made offline
+overwrites cleanly once synced.
+
+## Setting up sync on a device
+
+1. In the Amino Farms web app, go to **Payroll > Wages > Devices**, tap
+   "New device", name it (e.g. "Gate phone"), and copy the token shown —
+   it's shown exactly once.
+2. On the phone, unlock this app (PIN) and go to **Settings**, paste the
+   token, confirm the server URL (defaults to `https://aminofarms.replit.app`),
+   and save.
+3. Watch the "Sync status" panel on that same screen, or tap "Sync now" to
+   force an immediate push.
 
 ## First-time setup (do this once)
 
@@ -48,7 +97,9 @@ npm run dev
 
 This runs the full app (IndexedDB, face recognition, camera) in a normal
 browser tab — no Android device needed for day-to-day UI work. Grant camera
-permission when the browser asks.
+permission when the browser asks. Sync also works from the browser (the
+Amino Farms `/api/wages/sync` endpoint has narrow CORS enabled specifically
+for this path), so you can test the whole loop without a device build.
 
 ## Building the Android APK
 
@@ -92,11 +143,12 @@ happy to make that change if needed.
 ## Data model
 
 ```
-employees: id, name, aadharNumber, photoDataUrl, faceDescriptor, dailyWage, isActive
-punches:   id, employeeId, punchType (in/out), timestamp, punchDate, method, matchScore
+employees: id, name, aadharNumber, photoDataUrl, faceDescriptor, isActive, syncedAt?
+punches:   id, employeeId, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
+overrides: key ("<employeeId>|<date>"), employeeId, date, status (P/A), note, setAt, syncedAt?
 ```
 
-That's the whole schema — see `src/types.ts`.
+That's the whole schema — see `src/types.ts` and `src/lib/attendance.ts`.
 
 ## Known gaps / deliberate scope cuts
 
@@ -105,13 +157,20 @@ That's the whole schema — see `src/types.ts`.
   PII, consider adding device-level encryption (Android full-disk encryption
   is on by default on modern phones, which helps, but app-level encryption
   is stronger). Flagging this rather than silently skipping it.
-- **No backup.** If the phone is lost, factory-reset, or the app is
-  uninstalled, all data is gone. The wage report CSV export is the only way
-  data leaves the device today — export and store those reports somewhere
-  safe after every payroll cycle.
-- **Single device.** There's no mechanism to merge data from two phones if
-  you ever need more than one attendance device.
+- **No offline backup beyond sync.** If the phone is lost or factory-reset
+  before a sync completes, whatever hasn't synced yet is gone — the sync
+  cadence (10s in rush windows) is designed to keep that window small, but
+  it isn't zero.
+- **Sync is one-way.** If two devices ever enroll the same real person
+  independently, they become two separate worker records server-side —
+  there's no dedup/merge logic. Fine for one device; would need real
+  thought before adding a second.
 - **One face per employee.** Unlike the reference implementation, this app
   doesn't "relearn" a face over time from live captures — if someone's
   appearance changes enough to stop matching, re-enroll them from the
   Employees tab.
+- **No CORS hardening beyond scope.** The `/api/wages/sync` CORS allowance
+  is intentionally permissive (`Access-Control-Allow-Origin: *`) because the
+  endpoint is bearer-token authenticated, not cookie-authenticated — there's
+  no ambient credential for a random web page to ride along with. Don't
+  reuse that pattern for a cookie-authenticated endpoint.

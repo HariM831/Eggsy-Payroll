@@ -5,30 +5,49 @@ import PunchPage from "./pages/PunchPage";
 import EmployeesPage from "./pages/EmployeesPage";
 import EmployeeFormPage from "./pages/EmployeeFormPage";
 import CalendarPage from "./pages/CalendarPage";
-import ReportPage from "./pages/ReportPage";
+import SettingsPage from "./pages/SettingsPage";
 import { isUnlocked } from "./lib/pin";
 
 type Screen = View | "employee-form";
 
+// Punch is intentionally always open — anyone should be able to walk up and
+// punch attendance without a PIN. Everything else (worker enrollment,
+// attendance history, sync settings) is behind the lock.
+const PROTECTED: Screen[] = ["employees", "calendar", "settings", "employee-form"];
+
 export default function App() {
-  const [unlocked, setUnlocked] = useState(isUnlocked());
   const [screen, setScreen] = useState<Screen>("punch");
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
+  const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
 
-  if (!unlocked) {
-    return <LockScreen onUnlock={() => setUnlocked(true)} />;
+  function requestScreen(target: Screen) {
+    if (PROTECTED.includes(target) && !isUnlocked()) {
+      setPendingScreen(target);
+      return;
+    }
+    setScreen(target);
+  }
+
+  function handleUnlocked() {
+    const target = pendingScreen ?? "employees";
+    setPendingScreen(null);
+    setScreen(target);
   }
 
   function openAddEmployee() {
     setEditingEmployeeId(null);
-    setScreen("employee-form");
+    requestScreen("employee-form");
   }
   function openEditEmployee(id: string) {
     setEditingEmployeeId(id);
-    setScreen("employee-form");
+    requestScreen("employee-form");
   }
   function closeEmployeeForm() {
     setScreen("employees");
+  }
+
+  if (pendingScreen) {
+    return <LockScreen onUnlock={handleUnlocked} />;
   }
 
   return (
@@ -39,10 +58,10 @@ export default function App() {
         <EmployeeFormPage employeeId={editingEmployeeId} onDone={closeEmployeeForm} onCancel={closeEmployeeForm} />
       )}
       {screen === "calendar" && <CalendarPage />}
-      {screen === "report" && <ReportPage />}
+      {screen === "settings" && <SettingsPage />}
 
       {screen !== "employee-form" && (
-        <BottomNav active={screen as View} onChange={setScreen} />
+        <BottomNav active={screen as View} onChange={requestScreen} unlocked={isUnlocked()} />
       )}
     </div>
   );

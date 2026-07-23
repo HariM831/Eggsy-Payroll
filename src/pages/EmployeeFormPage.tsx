@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { createEmployee, getEmployee, updateEmployee } from "../lib/employees";
+import { syncSoon } from "../lib/sync";
 import type { Employee } from "../types";
 
 interface Props {
@@ -12,7 +13,6 @@ interface Props {
 export default function EmployeeFormPage({ employeeId, onDone, onCancel }: Props) {
   const [name, setName] = useState("");
   const [aadhar, setAadhar] = useState("");
-  const [wage, setWage] = useState("");
   const [capture, setCapture] = useState<CaptureResult | null>(null);
   const [existing, setExisting] = useState<Employee | null>(null);
   const [showCamera, setShowCamera] = useState(employeeId === null);
@@ -26,7 +26,6 @@ export default function EmployeeFormPage({ employeeId, onDone, onCancel }: Props
       setExisting(e);
       setName(e.name);
       setAadhar(e.aadharNumber);
-      setWage(String(e.dailyWage));
     });
   }, [employeeId]);
 
@@ -34,8 +33,6 @@ export default function EmployeeFormPage({ employeeId, onDone, onCancel }: Props
     setError(null);
     if (!name.trim()) return setError("Name is required");
     if (!/^\d{4}\s?\d{4}\s?\d{4}$/.test(aadhar.trim())) return setError("Aadhar should be 12 digits");
-    const dailyWage = Number(wage);
-    if (!Number.isFinite(dailyWage) || dailyWage < 0) return setError("Enter a valid daily wage");
     if (!employeeId && !capture) return setError("Capture a face photo to enroll this employee");
 
     setSaving(true);
@@ -44,18 +41,19 @@ export default function EmployeeFormPage({ employeeId, onDone, onCancel }: Props
         await updateEmployee(employeeId, {
           name: name.trim(),
           aadharNumber: aadhar.trim(),
-          dailyWage,
+          // Identity changed — clear syncedAt so the outbox re-pushes this record.
+          syncedAt: undefined,
           ...(capture ? { photoDataUrl: capture.photoDataUrl, faceDescriptor: capture.face.embedding! } : {}),
         });
       } else if (capture) {
         await createEmployee({
           name: name.trim(),
           aadharNumber: aadhar.trim(),
-          dailyWage,
           photoDataUrl: capture.photoDataUrl,
           faceDescriptor: capture.face.embedding!,
         });
       }
+      syncSoon();
       onDone();
     } catch (err: any) {
       setError(err.message ?? "Could not save employee");
@@ -88,16 +86,7 @@ export default function EmployeeFormPage({ employeeId, onDone, onCancel }: Props
             inputMode="numeric"
           />
         </label>
-        <label className="text-sm">
-          Daily wage (₹)
-          <input
-            value={wage}
-            onChange={(e) => setWage(e.target.value)}
-            className="mt-1 w-full border rounded-lg px-3 py-2"
-            placeholder="500"
-            inputMode="decimal"
-          />
-        </label>
+        <p className="text-xs text-gray-400 -mt-1">Daily wage is set in the Amino Farms Wages page once this worker syncs.</p>
 
         {existing && !showCamera && (
           <div className="flex items-center gap-3">

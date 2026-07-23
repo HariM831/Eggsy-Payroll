@@ -11,6 +11,15 @@ const config: CapacitorConfig = {
   server: {
     androidScheme: "https",
   },
+  plugins: {
+    // The sync engine POSTs to aminofarms.replit.app, a different origin
+    // from the app itself — route it through native HTTP so the WebView's
+    // CORS restrictions don't apply, same reasoning as the main Amino Farms
+    // Android app's capacitor.config.ts.
+    CapacitorHttp: {
+      enabled: true,
+    },
+  },
 };
 
 export default config;

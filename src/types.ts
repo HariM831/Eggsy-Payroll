@@ -5,9 +5,10 @@ export interface Employee {
   photoDataUrl: string;
   /** Face embedding captured from the enrollment photo — used to match punches. */
   faceDescriptor: number[];
-  dailyWage: number;
   isActive: boolean;
   createdAt: number;
+  /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
+  syncedAt?: number;
 }
 
 export type PunchType = "in" | "out";
@@ -28,6 +29,8 @@ export interface Punch {
   capturedPhotoDataUrl: string | null;
   /** set when HR manually corrects/creates a punch after the fact */
   note: string | null;
+  /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
+  syncedAt?: number;
 }
 
 export type DayStatus = "P" | "A";

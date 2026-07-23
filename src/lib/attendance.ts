@@ -6,13 +6,15 @@ import { getPunchesForEmployeeDate } from "./punches";
 import { localDate } from "./id";
 import type { DayResolution, Punch } from "../types";
 
-interface DayOverride {
+export interface DayOverride {
   key: string; // "<employeeId>|<date>"
   employeeId: string;
   date: string;
   status: "P" | "A";
   note: string;
   setAt: number;
+  /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
+  syncedAt?: number;
 }
 
 function overrideKey(employeeId: string, date: string): string {

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { listEmployees } from "../lib/employees";
 import { recordPunch } from "../lib/punches";
+import { syncSoon } from "../lib/sync";
 import { findBestMatch, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchCandidate } from "../lib/face";
 import type { Employee, Punch } from "../types";
 
@@ -37,6 +38,7 @@ export default function PunchPage() {
     const employee = employees.find((e) => e.id === match.id)!;
     const punch = await recordPunch({ employeeId: employee.id, method: "face", matchScore: match.score });
     setOutcome({ kind: "success", employee, punch });
+    syncSoon();
   }
 
   function reset() {
