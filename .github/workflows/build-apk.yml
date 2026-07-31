@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +21,40 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+
+      # Every build must be signed with the SAME debug key, or Android refuses
+      # to install a new APK over the previously installed one (signature
+      # mismatch), forcing an uninstall that wipes on-device data. A fresh
+      # runner has no keystore, so: reuse the one committed at
+      # debug.keystore if present, otherwise generate it once and commit it
+      # back so every future run (and any local build that copies the same
+      # file, see README) signs identically.
+      - name: Ensure fixed debug keystore
+        run: |
+          mkdir -p ~/.android
+          if [ -f debug.keystore ]; then
+            echo "Using committed debug.keystore"
+            cp debug.keystore ~/.android/debug.keystore
+          else
+            echo "No debug.keystore committed yet — generating one"
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            cp debug.keystore ~/.android/debug.keystore
+            echo "KEYSTORE_GENERATED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Commit newly generated debug keystore
+        if: env.KEYSTORE_GENERATED == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add debug.keystore
+          git commit -m "Add fixed debug keystore for consistent APK signing"
+          git push
 
       # No package-lock.json is committed (this repo was scaffolded without a
       # Node environment available to generate one), so `npm ci` can't run —

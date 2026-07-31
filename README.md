@@ -123,6 +123,7 @@ sources" — you don't need this on the Play Store.
 
 ```bash
 npm install
+cp debug.keystore ~/.android/debug.keystore   # match CI's signing key, see below
 npm run build
 npx cap add android          # first time only — generates the android/ project (gitignored)
 node scripts/patch-android-manifest.mjs   # adds the camera permission
@@ -135,6 +136,26 @@ The `android/` directory is intentionally **not committed** (see
 how the reference Amino Farms Android build works. `patch-android-manifest.mjs`
 re-adds the camera permission every time it's regenerated, since a fresh
 `cap add` wipes any manual manifest edits.
+
+## Updating an app already installed on a device
+
+`debug.keystore` (repo root) is a fixed debug signing key, committed so
+every build — CI or local — signs with the same certificate. The CI
+workflow generates it once on its first run (if not already committed) and
+commits it back automatically; after that it just reuses the file. This
+matters because Android refuses to install an APK over an existing app of
+the same package unless the signatures match — without a fixed key, every
+CI run would sign with a random new key and updating would require
+uninstalling first (which wipes on-device data: enrolled workers, any
+punches not yet synced).
+
+To push an update to a device that already has the app installed:
+
+1. Push your change to `main` (or trigger the workflow manually).
+2. Download the `niko-payroll-debug-apk` artifact from that run, unzip to
+   get `app-debug.apk`.
+3. Transfer it to the phone and tap to install — since it's signed with the
+   same key, this installs **in place**, no uninstall, no data loss.
 
 ## The one thing to verify first on a real device
 
