@@ -7,9 +7,6 @@ import {
   getSyncStatus,
   pendingCounts,
   syncNow,
-  getPayrollDeviceConfig,
-  setPayrollDeviceConfig,
-  clearPayrollDeviceConfig,
   getPayrollSyncStatus,
   payrollPendingCounts,
   syncPayrollNow,
@@ -35,23 +32,19 @@ export default function SettingsPage() {
   const [syncing, setSyncing] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // Payroll (salaried employee) sync — an independent device-token
-  // registration from Wages above; a phone may hold either token, both, or
-  // neither. See src/lib/sync.ts.
-  const [payrollServerUrl, setPayrollServerUrl] = useState(DEFAULT_SERVER_URL);
-  const [payrollToken, setPayrollToken] = useState("");
-  const [payrollSavedToken, setPayrollSavedToken] = useState<string | null>(null);
+  // Payroll (salaried employee) sync uses the SAME device token as Wages
+  // above — one physical phone, one token. Status/pending are still tracked
+  // separately since the two syncs are independent network calls. See
+  // src/lib/sync.ts.
   const [payrollStatus, setPayrollStatus] = useState<PayrollSyncStatus | null>(null);
   const [payrollCounts, setPayrollCounts] = useState({ punches: 0 });
   const [payrollSyncing, setPayrollSyncing] = useState(false);
-  const [payrollSaved, setPayrollSaved] = useState(false);
 
   async function refresh() {
-    const [config, s, c, payrollConfig, ps, pc] = await Promise.all([
+    const [config, s, c, ps, pc] = await Promise.all([
       getDeviceConfig(),
       getSyncStatus(),
       pendingCounts(),
-      getPayrollDeviceConfig(),
       getPayrollSyncStatus(),
       payrollPendingCounts(),
     ]);
@@ -61,10 +54,6 @@ export default function SettingsPage() {
     }
     setStatus(s);
     setCounts(c);
-    if (payrollConfig) {
-      setPayrollServerUrl(payrollConfig.serverUrl);
-      setPayrollSavedToken(payrollConfig.token);
-    }
     setPayrollStatus(ps);
     setPayrollCounts(pc);
   }
@@ -90,18 +79,9 @@ export default function SettingsPage() {
   }
 
   async function handleForget() {
-    if (!confirm("Remove the saved device token? Syncing will stop until a new one is entered.")) return;
+    if (!confirm("Remove the saved device token? All sync (Wages and Payroll) will stop until a new one is entered.")) return;
     await clearDeviceConfig();
     setSavedToken(null);
-    refresh();
-  }
-
-  async function handleSavePayrollConfig() {
-    if (!payrollToken.trim() && !payrollSavedToken) return;
-    await setPayrollDeviceConfig(payrollServerUrl.trim() || DEFAULT_SERVER_URL, payrollToken.trim() || payrollSavedToken!);
-    setPayrollSaved(true);
-    setPayrollToken("");
-    setTimeout(() => setPayrollSaved(false), 2000);
     refresh();
   }
 
@@ -112,13 +92,6 @@ export default function SettingsPage() {
     refresh();
   }
 
-  async function handleForgetPayroll() {
-    if (!confirm("Remove the saved payroll device token? Payroll sync will stop until a new one is entered.")) return;
-    await clearPayrollDeviceConfig();
-    setPayrollSavedToken(null);
-    refresh();
-  }
-
   return (
     <div className="p-4 pb-24">
       <h1 className="text-lg font-semibold mb-4">Settings</h1>
@@ -126,6 +99,10 @@ export default function SettingsPage() {
       <div className="max-w-sm space-y-6">
         <section className="space-y-3">
           <h2 className="text-sm font-medium text-gray-700">Sync to Amino Farms</h2>
+          <p className="text-xs text-gray-400">
+            One token covers both Wages workers and payroll employees — it's the same
+            physical device either way. Create/revoke it from Payroll &gt; Wages &gt; Devices.
+          </p>
 
           <label className="text-sm block">
             Server URL
@@ -167,7 +144,7 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-2 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Sync status</h2>
+          <h2 className="text-sm font-medium text-gray-700">Wages sync status</h2>
           <div className="text-sm text-gray-600 space-y-1">
             <p>Last attempt: {formatWhen(status?.lastAttemptAt ?? null)}</p>
             <p>Last success: {formatWhen(status?.lastSuccessAt ?? null)}</p>
@@ -188,52 +165,9 @@ export default function SettingsPage() {
           </button>
         </section>
 
-        <section className="space-y-3 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Payroll sync</h2>
-          <p className="text-xs text-gray-400">
-            For salaried employees, separate from Wages above. This device only pulls the
-            roster (read-only) and pushes punches — enrollment stays in Amino Farms.
-          </p>
-
-          <label className="text-sm block">
-            Server URL
-            <input
-              value={payrollServerUrl}
-              onChange={(e) => setPayrollServerUrl(e.target.value)}
-              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
-            />
-          </label>
-
-          <label className="text-sm block">
-            Device token
-            {payrollSavedToken && !payrollToken && (
-              <p className="text-xs text-green-600 mb-1">A token is saved (hidden). Enter a new one to replace it.</p>
-            )}
-            <input
-              value={payrollToken}
-              onChange={(e) => setPayrollToken(e.target.value)}
-              placeholder={payrollSavedToken ? "•••• saved — paste a new token to replace" : "Paste the token from Payroll > Attendance > Devices"}
-              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-mono"
-              type="password"
-            />
-          </label>
-
-          <div className="flex gap-2">
-            <button
-              onClick={handleSavePayrollConfig}
-              disabled={!payrollToken.trim() && !payrollSavedToken}
-              className="flex-1 py-2.5 rounded-lg bg-brand text-white text-sm font-medium disabled:opacity-50"
-            >
-              {payrollSaved ? "Saved" : "Save"}
-            </button>
-            {payrollSavedToken && (
-              <button onClick={handleForgetPayroll} className="px-3 py-2.5 rounded-lg border text-sm text-red-600">
-                Forget
-              </button>
-            )}
-          </div>
-
-          <div className="text-sm text-gray-600 space-y-1 pt-1">
+        <section className="space-y-2 border-t pt-4">
+          <h2 className="text-sm font-medium text-gray-700">Payroll sync status</h2>
+          <div className="text-sm text-gray-600 space-y-1">
             <p>Last attempt: {formatWhen(payrollStatus?.lastAttemptAt ?? null)}</p>
             <p>Last success: {formatWhen(payrollStatus?.lastSuccessAt ?? null)}</p>
             <p>
@@ -243,7 +177,7 @@ export default function SettingsPage() {
           </div>
           <button
             onClick={handlePayrollSyncNow}
-            disabled={payrollSyncing || !payrollSavedToken}
+            disabled={payrollSyncing || !savedToken}
             className="w-full py-2.5 rounded-lg border border-brand text-brand text-sm font-medium disabled:opacity-50"
           >
             {payrollSyncing ? "Syncing…" : "Sync now"}

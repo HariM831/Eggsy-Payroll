@@ -38,8 +38,8 @@ sibling to it, not a replacement.
   single capture is matched against both populations at once — see
   "Payroll (salaried) employees" below for how that combined match works.
 - **Sync**: `src/lib/sync.ts` runs two independent outboxes on the same
-  adaptive schedule — Wages (as below) and Payroll (its own device token,
-  see next section). For Wages: every employee/punch/override gets a
+  adaptive schedule and the same device token — Wages (as below) and
+  Payroll (see next section). For Wages: every employee/punch/override gets a
   `syncedAt` timestamp once successfully pushed. Unsynced records are
   retried on a schedule (see below) plus opportunistically: on `online`,
   on app foreground, and right after every punch/enrollment/correction.
@@ -93,10 +93,10 @@ descriptor) read-only from
 `server/routes/payroll-attendance-sync.ts` in the Amino Farms repo for the
 receiving end.
 
-- **Separate device token.** Payroll sync uses its own token, configured in
-  Settings under "Payroll sync" (from Amino Farms' Payroll > Attendance >
-  Devices), independent of the Wages token above — a phone can be
-  registered for either, both, or neither.
+- **Same device token as Wages.** It's one physical phone running one app,
+  so payroll sync reuses the token configured in Settings — there's no
+  separate payroll device registration. Devices are created/revoked from
+  Amino Farms' existing **Payroll > Wages > Devices** page.
 - **One punch screen, two populations.** The Punch tab matches a captured
   face against wage workers and payroll employees together — whichever
   population the match belongs to determines where the punch is recorded
@@ -117,7 +117,7 @@ receiving end.
 
 ## Setting up sync on a device
 
-For Wages:
+One token covers both Wages workers and payroll employees:
 
 1. In the Amino Farms web app, go to **Payroll > Wages > Devices**, tap
    "New device", name it (e.g. "Gate phone"), and copy the token shown —
@@ -125,13 +125,10 @@ For Wages:
 2. On the phone, unlock this app (PIN) and go to **Settings**, paste the
    token into the "Sync to Amino Farms" section, confirm the server URL
    (defaults to `https://aminofarms.replit.app`), and save.
-3. Watch the "Sync status" panel on that same screen, or tap "Sync now" to
-   force an immediate push.
-
-For payroll employees, same idea in the separate "Payroll sync" section
-further down Settings: create a device token from Amino Farms'
-**Payroll > Attendance > Devices** instead, and paste it there. A device can
-have one, both, or neither token configured — each is independent.
+3. Watch the "Wages sync status" and "Payroll sync status" panels further
+   down the same screen — each tracks its own outbox independently even
+   though they share one token — or tap either "Sync now" to force an
+   immediate push.
 
 ## First-time setup (do this once)
 
@@ -230,7 +227,8 @@ payrollEmployees:  id, empCode, name, department, designation, faceDescriptor, r
                    — read-only, pulled from the server; this device never writes these rows
 payrollPunches:    id, employeeId, empCode, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
 meta:              key "cached-roles" — role names last seen from the server (Wages enrollment suggestions only)
-                   key "sync-config" / "payroll-sync-config" — the two independent device tokens
+                   key "sync-config" — the one device token, shared by Wages and Payroll sync
+                   key "sync-status" / "payroll-sync-status" — tracked independently per outbox
 ```
 
 That's the whole schema — see `src/types.ts` and `src/lib/attendance.ts`.

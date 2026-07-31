@@ -188,32 +188,16 @@ export function syncSoon(): void {
 }
 
 // ── Payroll (salaried employee) sync ────────────────────────────────────────
-// Separate device-token scope from the Wages sync above — a phone may be
-// registered for Wages sync, payroll-attendance sync, or both
-// independently. Two-way in a different sense than Wages: the roster
-// (identity, enrollment, face descriptors) is server -> device only, since
-// payroll employees are server-owned and this device can't enroll them;
-// only punches go device -> server. See server/routes/payroll-attendance-sync.ts.
-
-interface PayrollDeviceConfig {
-  key: "payroll-sync-config";
-  serverUrl: string;
-  token: string;
-}
-
-export async function getPayrollDeviceConfig(): Promise<{ serverUrl: string; token: string } | null> {
-  const cfg = await get<PayrollDeviceConfig>("meta", "payroll-sync-config");
-  if (!cfg?.token) return null;
-  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token };
-}
-
-export async function setPayrollDeviceConfig(serverUrl: string, token: string): Promise<void> {
-  await put<PayrollDeviceConfig>("meta", { key: "payroll-sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token });
-}
-
-export async function clearPayrollDeviceConfig(): Promise<void> {
-  await put<PayrollDeviceConfig>("meta", { key: "payroll-sync-config", serverUrl: DEFAULT_SERVER_URL, token: "" });
-}
+// Uses the SAME device token as Wages above (getDeviceConfig) — it's one
+// physical phone running one app, so one token, created/revoked from the
+// existing Payroll > Wages > Devices page. Sync status is tracked
+// separately from Wages below, though, since the two are independent
+// network calls that can succeed/fail independently even with the same
+// token (useful for telling which side broke). Two-way in a different
+// sense than Wages: the roster (identity, enrollment, face descriptors) is
+// server -> device only, since payroll employees are server-owned and this
+// device can't enroll them; only punches go device -> server. See
+// server/routes/payroll-attendance-sync.ts.
 
 export interface PayrollSyncStatus {
   key: "payroll-sync-status";
@@ -256,8 +240,8 @@ let payrollSyncing = false;
 
 export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; synced?: number }> {
   if (payrollSyncing) return { ok: false, error: "Sync already in progress" };
-  const config = await getPayrollDeviceConfig();
-  if (!config) return { ok: false, error: "No payroll device token configured yet" };
+  const config = await getDeviceConfig(); // shared with Wages — see module comment above
+  if (!config) return { ok: false, error: "No device token configured yet" };
 
   payrollSyncing = true;
   await setPayrollSyncStatus({ lastAttemptAt: Date.now() });
@@ -346,9 +330,9 @@ function nextDelayMs(): number {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let started = false;
 
-/** Runs both sync scopes together — each is a no-op (cheap early return) if
- * that scope has no device token configured, so a phone registered for
- * only one of Wages/Payroll doesn't pay for the other. */
+/** Runs both sync scopes together — they share one device token (see module
+ * comment above), so both fire once it's configured; before that, both are
+ * cheap early-return no-ops. */
 function syncAllNow(): Promise<unknown> {
   return Promise.all([syncNow(), syncPayrollNow()]);
 }
