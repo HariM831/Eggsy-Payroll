@@ -35,6 +35,39 @@ export interface Punch {
   syncedAt?: number;
 }
 
+// Payroll (salaried) employees — a read-only local mirror of the main app's
+// payroll roster, pulled via sync.ts. Unlike Employee (Wages workers,
+// enrolled ON this device), this device never creates or edits these rows —
+// the server owns identity and enrollment (main app's face-enrollment
+// page); the device only pulls the roster to match punches against.
+export interface PayrollEmployee {
+  id: string;
+  empCode: string;
+  name: string;
+  department: string | null;
+  designation: string | null;
+  faceDescriptor: number[] | null;
+  /** Day-diverse recent live-capture embeddings from the server, for matching tolerance. */
+  recentEmbeddings: number[][];
+  /** unix ms this roster row was last pulled from the server. */
+  cachedAt: number;
+}
+
+export interface PayrollPunch {
+  id: string;
+  employeeId: string;
+  empCode: string;
+  punchType: PunchType;
+  /** unix ms */
+  timestamp: number;
+  /** local calendar date the punch belongs to, YYYY-MM-DD (device-local time) */
+  punchDate: string;
+  method: PunchMethod;
+  matchScore: number | null;
+  /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
+  syncedAt?: number;
+}
+
 export type DayStatus = "P" | "A";
 
 export interface DayResolution {

@@ -146,6 +146,39 @@ export function findBestMatch(embedding: number[], candidates: MatchCandidate[])
   return { id: best, score: Math.max(0, bestScore), secondScore: Math.max(0, secondScore) };
 }
 
+export interface MatchGallery {
+  id: string;
+  /** One or more descriptors for this identity (e.g. an enrollment photo
+   * plus several recent live-capture embeddings). */
+  descriptors: number[][];
+}
+
+/** Like findBestMatch, but each candidate may have MULTIPLE descriptors.
+ * Pools each identity's best score first, so a second/third descriptor for
+ * the SAME identity is never mistaken for a different identity's runner-up
+ * score (which would wrongly trigger the too-close-to-call ambiguous path).
+ * Mirrors the main app's server-side relearn-conflict gallery logic. */
+export function findBestMatchInGalleries(embedding: number[], galleries: MatchGallery[]): MatchResult {
+  let best: string | null = null;
+  let bestScore = -1;
+  let secondScore = -1;
+  for (const g of galleries) {
+    let s = -1;
+    for (const d of g.descriptors) {
+      const v = cosineSimilarity(embedding, d);
+      if (v > s) s = v;
+    }
+    if (s > bestScore) {
+      secondScore = bestScore;
+      bestScore = s;
+      best = g.id;
+    } else if (s > secondScore) {
+      secondScore = s;
+    }
+  }
+  return { id: best, score: Math.max(0, bestScore), secondScore: Math.max(0, secondScore) };
+}
+
 export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();

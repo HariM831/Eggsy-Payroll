@@ -1,44 +1,79 @@
 import { useEffect, useState } from "react";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { listEmployees } from "../lib/employees";
-import { recordPunch } from "../lib/punches";
-import { syncSoon } from "../lib/sync";
-import { findBestMatch, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchCandidate } from "../lib/face";
-import type { Employee, Punch } from "../types";
+import { listPayrollEmployees } from "../lib/payrollEmployees";
+import { recordPunch, recordPayrollPunch } from "../lib/punches";
+import { syncSoon, syncPayrollSoon } from "../lib/sync";
+import { findBestMatchInGalleries, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchGallery } from "../lib/face";
+import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 
 type Outcome =
-  | { kind: "success"; employee: Employee; punch: Punch }
+  | { kind: "success"; origin: "wage"; employee: Employee; punch: Punch }
+  | { kind: "success"; origin: "payroll"; employee: PayrollEmployee; punch: PayrollPunch }
   | { kind: "no-match"; score: number }
   | { kind: "ambiguous"; topName: string; score: number; secondScore: number };
 
 export default function PunchPage() {
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [wageEmployees, setWageEmployees] = useState<Employee[]>([]);
+  const [payrollEmployees, setPayrollEmployees] = useState<PayrollEmployee[]>([]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [captureKey, setCaptureKey] = useState(0); // bump to remount the camera for the next punch
 
   useEffect(() => {
-    listEmployees().then(setEmployees);
+    listEmployees().then(setWageEmployees);
+    listPayrollEmployees().then(setPayrollEmployees);
   }, [captureKey]);
 
   async function handleCapture({ face }: CaptureResult) {
     if (!face.embedding) return;
-    const candidates: MatchCandidate[] = employees.map((e) => ({ id: e.id, descriptor: e.faceDescriptor }));
-    const match = findBestMatch(face.embedding, candidates);
+
+    // One combined face gallery so a single "walk up and punch" flow works
+    // for both populations without asking the person to pick a mode first.
+    // Wage workers have exactly one descriptor (their enrollment photo);
+    // payroll employees may have several (enrollment + recent embeddings
+    // pulled from the server) — findBestMatchInGalleries pools per-identity
+    // so that never gets mistaken for a different person's runner-up score.
+    const galleries: MatchGallery[] = [
+      ...wageEmployees.map((e) => ({ id: e.id, descriptors: [e.faceDescriptor] })),
+      ...payrollEmployees.map((e) => ({
+        id: e.id,
+        descriptors: [e.faceDescriptor, ...e.recentEmbeddings].filter(
+          (d): d is number[] => Array.isArray(d) && d.length > 0,
+        ),
+      })),
+    ];
+    const match = findBestMatchInGalleries(face.embedding, galleries);
 
     if (!match.id || match.score < DEFAULT_MATCH_THRESHOLD) {
       setOutcome({ kind: "no-match", score: match.score });
       return;
     }
     if (match.score - match.secondScore < MIN_MATCH_MARGIN && match.secondScore > 0) {
-      const topName = employees.find((e) => e.id === match.id)?.name ?? "Unknown";
+      const topName =
+        wageEmployees.find((e) => e.id === match.id)?.name ??
+        payrollEmployees.find((e) => e.id === match.id)?.name ??
+        "Unknown";
       setOutcome({ kind: "ambiguous", topName, score: match.score, secondScore: match.secondScore });
       return;
     }
 
-    const employee = employees.find((e) => e.id === match.id)!;
-    const punch = await recordPunch({ employeeId: employee.id, method: "face", matchScore: match.score });
-    setOutcome({ kind: "success", employee, punch });
-    syncSoon();
+    const wageEmployee = wageEmployees.find((e) => e.id === match.id);
+    if (wageEmployee) {
+      const punch = await recordPunch({ employeeId: wageEmployee.id, method: "face", matchScore: match.score });
+      setOutcome({ kind: "success", origin: "wage", employee: wageEmployee, punch });
+      syncSoon();
+      return;
+    }
+
+    const payrollEmployee = payrollEmployees.find((e) => e.id === match.id)!;
+    const punch = await recordPayrollPunch({
+      employeeId: payrollEmployee.id,
+      empCode: payrollEmployee.empCode,
+      method: "face",
+      matchScore: match.score,
+    });
+    setOutcome({ kind: "success", origin: "payroll", employee: payrollEmployee, punch });
+    syncPayrollSoon();
   }
 
   function reset() {
@@ -46,10 +81,10 @@ export default function PunchPage() {
     setCaptureKey((k) => k + 1);
   }
 
-  if (employees.length === 0) {
+  if (wageEmployees.length === 0 && payrollEmployees.length === 0) {
     return (
       <div className="p-6 text-center text-gray-500">
-        No employees enrolled yet. Add one from the Employees tab first.
+        No one enrolled yet. Add a wage worker from the Employees tab, or sync a payroll device token in Settings.
       </div>
     );
   }
@@ -57,7 +92,7 @@ export default function PunchPage() {
   if (outcome) {
     return (
       <div className="p-6 flex flex-col items-center gap-4 text-center">
-        {outcome.kind === "success" && (
+        {outcome.kind === "success" && outcome.origin === "wage" && (
           <>
             <img src={outcome.employee.photoDataUrl} className="w-24 h-24 rounded-full object-cover" />
             <div>
@@ -70,6 +105,21 @@ export default function PunchPage() {
               </p>
             </div>
           </>
+        )}
+        {outcome.kind === "success" && outcome.origin === "payroll" && (
+          <div>
+            <p className="text-xl font-semibold">{outcome.employee.name}</p>
+            <p className="text-sm text-gray-400">
+              {outcome.employee.empCode}
+              {outcome.employee.designation ? ` · ${outcome.employee.designation}` : ""}
+            </p>
+            <p className={`text-lg font-medium ${outcome.punch.punchType === "in" ? "text-green-600" : "text-amber-600"}`}>
+              Punched {outcome.punch.punchType.toUpperCase()}
+            </p>
+            <p className="text-sm text-gray-500">
+              {new Date(outcome.punch.timestamp).toLocaleTimeString()} · match {(outcome.punch.matchScore! * 100).toFixed(0)}%
+            </p>
+          </div>
         )}
         {outcome.kind === "no-match" && (
           <div>

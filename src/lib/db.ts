@@ -4,13 +4,16 @@
 // Android WebView with zero platform-specific branches.
 //
 // Stores:
-//   employees  — keyPath "id"
-//   punches    — keyPath "id", index "byEmployeeDate" on [employeeId, punchDate]
-//   overrides  — keyPath "key" ("<employeeId>|<date>"), manual day-status corrections
-//   meta       — keyPath "key", arbitrary settings (PIN hash, etc.)
+//   employees        — keyPath "id" — Wages workers, enrolled on-device
+//   punches          — keyPath "id", index "byEmployeeDate" on [employeeId, punchDate] — Wages punches
+//   overrides        — keyPath "key" ("<employeeId>|<date>"), manual day-status corrections (Wages only)
+//   payrollEmployees — keyPath "id" — read-only mirror of the main app's payroll roster
+//                      (this device never enrolls a payroll employee; see sync.ts)
+//   payrollPunches   — keyPath "id", index "byEmployeeDate" on [employeeId, punchDate]
+//   meta             — keyPath "key", arbitrary settings (PIN hash, sync config, etc.)
 
 const DB_NAME = "niko-payroll";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -30,6 +33,14 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains("overrides")) {
         db.createObjectStore("overrides", { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains("payrollEmployees")) {
+        db.createObjectStore("payrollEmployees", { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains("payrollPunches")) {
+        const store = db.createObjectStore("payrollPunches", { keyPath: "id" });
+        store.createIndex("byEmployeeDate", ["employeeId", "punchDate"], { unique: false });
+        store.createIndex("byEmployee", "employeeId", { unique: false });
       }
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "key" });

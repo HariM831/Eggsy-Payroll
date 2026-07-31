@@ -11,7 +11,7 @@
 // suggest existing roles — the rate itself is never sent here. See
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
 import { getAll, get, put } from "./db";
-import type { Employee, Punch } from "../types";
+import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 import type { DayOverride } from "./attendance";
 
 export const DEFAULT_SERVER_URL = "https://aminofarms.replit.app";
@@ -187,6 +187,138 @@ export function syncSoon(): void {
   syncNow().catch(() => {});
 }
 
+// ── Payroll (salaried employee) sync ────────────────────────────────────────
+// Separate device-token scope from the Wages sync above — a phone may be
+// registered for Wages sync, payroll-attendance sync, or both
+// independently. Two-way in a different sense than Wages: the roster
+// (identity, enrollment, face descriptors) is server -> device only, since
+// payroll employees are server-owned and this device can't enroll them;
+// only punches go device -> server. See server/routes/payroll-attendance-sync.ts.
+
+interface PayrollDeviceConfig {
+  key: "payroll-sync-config";
+  serverUrl: string;
+  token: string;
+}
+
+export async function getPayrollDeviceConfig(): Promise<{ serverUrl: string; token: string } | null> {
+  const cfg = await get<PayrollDeviceConfig>("meta", "payroll-sync-config");
+  if (!cfg?.token) return null;
+  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token };
+}
+
+export async function setPayrollDeviceConfig(serverUrl: string, token: string): Promise<void> {
+  await put<PayrollDeviceConfig>("meta", { key: "payroll-sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token });
+}
+
+export async function clearPayrollDeviceConfig(): Promise<void> {
+  await put<PayrollDeviceConfig>("meta", { key: "payroll-sync-config", serverUrl: DEFAULT_SERVER_URL, token: "" });
+}
+
+export interface PayrollSyncStatus {
+  key: "payroll-sync-status";
+  lastAttemptAt: number | null;
+  lastSuccessAt: number | null;
+  lastError: string | null;
+}
+
+export async function getPayrollSyncStatus(): Promise<PayrollSyncStatus> {
+  const s = await get<PayrollSyncStatus>("meta", "payroll-sync-status");
+  return s ?? { key: "payroll-sync-status", lastAttemptAt: null, lastSuccessAt: null, lastError: null };
+}
+
+async function setPayrollSyncStatus(patch: Partial<PayrollSyncStatus>): Promise<void> {
+  const current = await getPayrollSyncStatus();
+  await put<PayrollSyncStatus>("meta", { ...current, ...patch, key: "payroll-sync-status" });
+}
+
+async function getUnsyncedPayrollPunches(): Promise<PayrollPunch[]> {
+  const all = await getAll<PayrollPunch>("payrollPunches");
+  return all.filter((p) => !p.syncedAt);
+}
+
+export async function payrollPendingCounts(): Promise<{ punches: number }> {
+  const punches = await getUnsyncedPayrollPunches();
+  return { punches: punches.length };
+}
+
+interface RosterEmployee {
+  id: string;
+  empCode: string;
+  name: string;
+  department: string | null;
+  designation: string | null;
+  faceDescriptor: number[] | null;
+  recentEmbeddings: number[][];
+}
+
+let payrollSyncing = false;
+
+export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; synced?: number }> {
+  if (payrollSyncing) return { ok: false, error: "Sync already in progress" };
+  const config = await getPayrollDeviceConfig();
+  if (!config) return { ok: false, error: "No payroll device token configured yet" };
+
+  payrollSyncing = true;
+  await setPayrollSyncStatus({ lastAttemptAt: Date.now() });
+  try {
+    // Pull the roster first — the punch flow can't match a payroll
+    // employee's face at all until it has descriptors to compare against.
+    const rosterRes = await fetch(`${config.serverUrl}/api/attendance-sync/employees`, {
+      headers: { Authorization: `Bearer ${config.token}` },
+    });
+    if (!rosterRes.ok) {
+      const body = await rosterRes.text().catch(() => "");
+      throw new Error(`Roster fetch responded ${rosterRes.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+    }
+    const roster: RosterEmployee[] = await rosterRes.json();
+    const now = Date.now();
+    await Promise.all(
+      roster.map((e) => put<PayrollEmployee>("payrollEmployees", { ...e, cachedAt: now })),
+    );
+
+    const punches = await getUnsyncedPayrollPunches();
+    if (punches.length > 0) {
+      const payload = {
+        punches: punches.map((p) => ({
+          id: p.id,
+          employeeId: p.employeeId,
+          punchType: p.punchType,
+          punchDate: p.punchDate,
+          timestamp: p.timestamp,
+          method: p.method,
+          matchScore: p.matchScore,
+        })),
+      };
+      const res = await fetch(`${config.serverUrl}/api/attendance-sync/punches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`Server responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+      }
+      await Promise.all(punches.map((p) => put("payrollPunches", { ...p, syncedAt: now })));
+    }
+
+    await setPayrollSyncStatus({ lastSuccessAt: now, lastError: null });
+    return { ok: true, synced: punches.length };
+  } catch (err: any) {
+    const message = err?.message ?? String(err);
+    await setPayrollSyncStatus({ lastError: message });
+    return { ok: false, error: message };
+  } finally {
+    payrollSyncing = false;
+  }
+}
+
+/** Fire-and-forget — call after a payroll punch so it shows up centrally
+ * quickly without waiting for the next scheduled tick. Never throws. */
+export function syncPayrollSoon(): void {
+  syncPayrollNow().catch(() => {});
+}
+
 // ── Adaptive scheduler ──────────────────────────────────────────────────────
 // Frequent (every 10s) during shift-start/shift-end rush windows when many
 // workers are punching in quick succession and near-live visibility matters;
@@ -214,10 +346,17 @@ function nextDelayMs(): number {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let started = false;
 
+/** Runs both sync scopes together — each is a no-op (cheap early return) if
+ * that scope has no device token configured, so a phone registered for
+ * only one of Wages/Payroll doesn't pay for the other. */
+function syncAllNow(): Promise<unknown> {
+  return Promise.all([syncNow(), syncPayrollNow()]);
+}
+
 function scheduleNext() {
   if (timer) clearTimeout(timer);
   timer = setTimeout(async () => {
-    await syncNow();
+    await syncAllNow();
     scheduleNext(); // recomputed each tick so crossing a rush-window boundary re-paces immediately
   }, nextDelayMs());
 }
@@ -227,8 +366,8 @@ export function startAutoSync(): void {
   if (started) return;
   started = true;
   scheduleNext();
-  window.addEventListener("online", () => syncNow());
+  window.addEventListener("online", () => syncAllNow());
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") syncNow();
+    if (document.visibilityState === "visible") syncAllNow();
   });
 }

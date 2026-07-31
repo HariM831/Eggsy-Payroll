@@ -10,11 +10,14 @@ requiring a manual export.
 role like "Mason" or "Helper"), punch attendance by face recognition, see a
 calendar of who was present/absent, and sync it all to Amino Farms' Payroll
 > Wages page, where the daily rate *per role* is configured and the wage
-settlement report (present days x that role's rate) is generated.
+settlement report (present days x that role's rate) is generated. Salaried
+**payroll employees** can also punch in/out here, from the same "walk up and
+punch" screen as wage workers — see "Payroll (salaried) employees" below.
 
 **What it deliberately does not do:** shifts, holidays, leave, statutory
-deductions. If you need those, use the full Amino Farms/Niko payroll module
-instead — this app is a narrow sibling to it, not a replacement.
+deductions, or on-device enrollment of payroll employees. If you need those,
+use the full Amino Farms/Niko payroll module instead — this app is a narrow
+sibling to it, not a replacement.
 
 ## Who can do what
 
@@ -27,12 +30,17 @@ instead — this app is a narrow sibling to it, not a replacement.
 ## How it works
 
 - **Storage**: IndexedDB, entirely on-device (`src/lib/db.ts`). Stores:
-  `employees`, `punches`, `overrides` (manual day corrections), `meta`
-  (PIN, sync config/status).
+  `employees`, `punches`, `overrides` (manual day corrections, Wages only),
+  `payrollEmployees` (read-only payroll roster mirror), `payrollPunches`,
+  `meta` (PIN, sync config/status for both scopes).
 - **Face recognition**: [`@vladmandic/human`](https://github.com/vladmandic/human),
-  bundled locally (see `scripts/copy-face-models.mjs`) — no CDN calls.
-- **Sync**: `src/lib/sync.ts` is an outbox — every employee/punch/override
-  gets a `syncedAt` timestamp once successfully pushed. Unsynced records are
+  bundled locally (see `scripts/copy-face-models.mjs`) — no CDN calls. A
+  single capture is matched against both populations at once — see
+  "Payroll (salaried) employees" below for how that combined match works.
+- **Sync**: `src/lib/sync.ts` runs two independent outboxes on the same
+  adaptive schedule — Wages (as below) and Payroll (its own device token,
+  see next section). For Wages: every employee/punch/override gets a
+  `syncedAt` timestamp once successfully pushed. Unsynced records are
   retried on a schedule (see below) plus opportunistically: on `online`,
   on app foreground, and right after every punch/enrollment/correction.
   Device → server for identity and attendance, with one exception: the
@@ -72,16 +80,58 @@ overrides are upsert-by-id so a correction made offline overwrites cleanly
 once synced. If a worker's role doesn't match any configured role name yet,
 the Wages page flags them so HR notices before running payroll.
 
+## Payroll (salaried) employees
+
+Payroll employees are a completely different population from Wages workers
+— they already exist in Amino Farms' main `employees` table with a
+server-generated id, and already have a face-recognition punch flow at the
+main app's own browser gate kiosk. This app does **not** enroll them: it
+only pulls the existing roster (name, department, designation, face
+descriptor) read-only from
+`GET /api/attendance-sync/employees`, and pushes punches back via
+`POST /api/attendance-sync/punches`. See
+`server/routes/payroll-attendance-sync.ts` in the Amino Farms repo for the
+receiving end.
+
+- **Separate device token.** Payroll sync uses its own token, configured in
+  Settings under "Payroll sync" (from Amino Farms' Payroll > Attendance >
+  Devices), independent of the Wages token above — a phone can be
+  registered for either, both, or neither.
+- **One punch screen, two populations.** The Punch tab matches a captured
+  face against wage workers and payroll employees together — whichever
+  population the match belongs to determines where the punch is recorded
+  and synced. Payroll employees may have several reference descriptors
+  (their enrollment photo plus recent live-capture embeddings sent from the
+  server) instead of just one; matching pools each identity's best score
+  first (`findBestMatchInGalleries` in `src/lib/face.ts`) so that never
+  gets confused for a different person.
+- **The same employee can also punch at the browser gate kiosk.** That's
+  expected, not a conflict — the server recomputes each day's attendance
+  from *all* punches for that employee+date regardless of source, so
+  kiosk and phone punches merge correctly as long as both eventually sync.
+- **Known simplification:** night-shift carryover (an OUT punch after
+  midnight staying attached to the prior day's IN) is a kiosk-only,
+  real-time feature — a phone-synced post-midnight OUT lands on the new
+  calendar day instead. HR's existing attendance exceptions/override tools
+  in Amino Farms cover the rare mismatch.
+
 ## Setting up sync on a device
+
+For Wages:
 
 1. In the Amino Farms web app, go to **Payroll > Wages > Devices**, tap
    "New device", name it (e.g. "Gate phone"), and copy the token shown —
    it's shown exactly once.
 2. On the phone, unlock this app (PIN) and go to **Settings**, paste the
-   token, confirm the server URL (defaults to `https://aminofarms.replit.app`),
-   and save.
+   token into the "Sync to Amino Farms" section, confirm the server URL
+   (defaults to `https://aminofarms.replit.app`), and save.
 3. Watch the "Sync status" panel on that same screen, or tap "Sync now" to
    force an immediate push.
+
+For payroll employees, same idea in the separate "Payroll sync" section
+further down Settings: create a device token from Amino Farms'
+**Payroll > Attendance > Devices** instead, and paste it there. A device can
+have one, both, or neither token configured — each is independent.
 
 ## First-time setup (do this once)
 
@@ -173,10 +223,14 @@ happy to make that change if needed.
 ## Data model
 
 ```
-employees: id, name, aadharNumber, photoDataUrl, faceDescriptor, role, isActive, syncedAt?
-punches:   id, employeeId, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
-overrides: key ("<employeeId>|<date>"), employeeId, date, status (P/A), note, setAt, syncedAt?
-meta:      key "cached-roles" — role names last seen from the server (enrollment suggestions only)
+employees:        id, name, aadharNumber, photoDataUrl, faceDescriptor, role, isActive, syncedAt?
+punches:           id, employeeId, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
+overrides:         key ("<employeeId>|<date>"), employeeId, date, status (P/A), note, setAt, syncedAt?
+payrollEmployees:  id, empCode, name, department, designation, faceDescriptor, recentEmbeddings, cachedAt
+                   — read-only, pulled from the server; this device never writes these rows
+payrollPunches:    id, employeeId, empCode, punchType (in/out), timestamp, punchDate, method, matchScore, syncedAt?
+meta:              key "cached-roles" — role names last seen from the server (Wages enrollment suggestions only)
+                   key "sync-config" / "payroll-sync-config" — the two independent device tokens
 ```
 
 That's the whole schema — see `src/types.ts` and `src/lib/attendance.ts`.
@@ -196,12 +250,21 @@ That's the whole schema — see `src/types.ts` and `src/lib/attendance.ts`.
   independently, they become two separate worker records server-side —
   there's no dedup/merge logic. Fine for one device; would need real
   thought before adding a second.
-- **One face per employee.** Unlike the reference implementation, this app
-  doesn't "relearn" a face over time from live captures — if someone's
-  appearance changes enough to stop matching, re-enroll them from the
-  Employees tab.
-- **No CORS hardening beyond scope.** The `/api/wages/sync` CORS allowance
-  is intentionally permissive (`Access-Control-Allow-Origin: *`) because the
-  endpoint is bearer-token authenticated, not cookie-authenticated — there's
-  no ambient credential for a random web page to ride along with. Don't
-  reuse that pattern for a cookie-authenticated endpoint.
+- **One face per employee for wage workers.** Unlike the reference
+  implementation, this app doesn't "relearn" a wage worker's face over time
+  from live captures — if someone's appearance changes enough to stop
+  matching, re-enroll them from the Employees tab. Payroll employees do get
+  multiple reference descriptors (server-side relearn from the kiosk), but
+  this device never contributes new ones — it only ever pulls what the
+  server already has.
+- **No CORS hardening beyond scope.** The `/api/wages/sync` and
+  `/api/attendance-sync/*` CORS allowances are intentionally permissive
+  (`Access-Control-Allow-Origin: *`) because both endpoints are
+  bearer-token authenticated, not cookie-authenticated — there's no ambient
+  credential for a random web page to ride along with. Don't reuse that
+  pattern for a cookie-authenticated endpoint.
+- **No manual-relearn/anti-spoof cross-check for payroll punches.** The
+  main app's kiosk lets a guard manually correct a mismatch, which
+  cross-checks the capture isn't actually a different enrolled employee
+  before it teaches the gallery. This device has no equivalent guard-picks
+  flow, so a payroll punch here is always the top face match, taken as-is.
