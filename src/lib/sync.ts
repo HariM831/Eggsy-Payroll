@@ -183,8 +183,16 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
     const nothingPending = employees.length === 0 && punches.length === 0 && overrides.length === 0;
     const rolesCached = (await getCachedRoles()).length > 0;
     if (nothingPending && rolesCached) {
+      // Nothing to push, but still pull the roster in case this is a
+      // reinstalled / replacement device that needs its workers restored.
+      let restored = 0;
+      try {
+        restored = await pullWorkerRoster(config.serverUrl, config.token);
+      } catch {
+        // best-effort
+      }
       await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
-      return { ok: true, synced: 0 };
+      return { ok: true, synced: 0, restored };
     }
 
     const payload = {
