@@ -32,13 +32,13 @@ export default function SettingsPage() {
   const [syncing, setSyncing] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // Payroll (salaried employee) sync uses the SAME device token as Wages
-  // above — one physical phone, one token. Status/pending are still tracked
-  // separately since the two syncs are independent network calls. See
-  // src/lib/sync.ts.
+  // Payroll (salaried employee) sync state
   const [payrollStatus, setPayrollStatus] = useState<PayrollSyncStatus | null>(null);
   const [payrollCounts, setPayrollCounts] = useState({ punches: 0 });
   const [payrollSyncing, setPayrollSyncing] = useState(false);
+
+  const [verifying, setVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   async function refresh() {
     const [config, s, c, ps, pc] = await Promise.all([
@@ -64,9 +64,32 @@ export default function SettingsPage() {
 
   async function handleSaveConfig() {
     if (!token.trim() && !savedToken) return;
-    await setDeviceConfig(serverUrl.trim() || DEFAULT_SERVER_URL, token.trim() || savedToken!);
+    const finalUrl = serverUrl.trim() || DEFAULT_SERVER_URL;
+    const finalToken = token.trim() || savedToken!;
+
+    await setDeviceConfig(finalUrl, finalToken);
     setSaved(true);
     setToken("");
+    setVerifyResult(null);
+    setVerifying(true);
+
+    const [resWages, resPayroll] = await Promise.all([
+      syncNow(),
+      syncPayrollNow(),
+    ]);
+
+    setVerifying(false);
+    if (resWages.ok && resPayroll.ok) {
+      const restored = resWages.restored ?? 0;
+      const message = restored > 0
+        ? `Connected successfully! Restored ${restored} worker${restored === 1 ? "" : "s"} from the server.`
+        : "Connected successfully! Device token verified.";
+      setVerifyResult({ ok: true, message });
+    } else {
+      const err = resWages.error || resPayroll.error || "Connection failed";
+      setVerifyResult({ ok: false, message: `Connection failed: ${err}` });
+    }
+
     setTimeout(() => setSaved(false), 2000);
     refresh();
   }
@@ -82,6 +105,7 @@ export default function SettingsPage() {
     if (!confirm("Remove the saved device token? All sync (Wages and Payroll) will stop until a new one is entered.")) return;
     await clearDeviceConfig();
     setSavedToken(null);
+    setVerifyResult(null);
     refresh();
   }
 
@@ -130,10 +154,10 @@ export default function SettingsPage() {
           <div className="flex gap-2">
             <button
               onClick={handleSaveConfig}
-              disabled={!token.trim() && !savedToken}
+              disabled={!token.trim() && !savedToken || verifying}
               className="flex-1 py-2.5 rounded-lg bg-brand text-white text-sm font-medium disabled:opacity-50"
             >
-              {saved ? "Saved" : "Save"}
+              {verifying ? "Verifying…" : saved ? "Saved" : "Save"}
             </button>
             {savedToken && (
               <button onClick={handleForget} className="px-3 py-2.5 rounded-lg border text-sm text-red-600">
@@ -141,6 +165,26 @@ export default function SettingsPage() {
               </button>
             )}
           </div>
+
+          {verifying && (
+            <div className="p-3 bg-blue-50 border border-blue-200 text-blue-700 text-xs rounded-lg flex items-center gap-2">
+              <span className="inline-block w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></span>
+              Verifying connection with server…
+            </div>
+          )}
+
+          {!verifying && verifyResult && (
+            <div
+              className={`p-3 border text-xs rounded-lg font-medium ${
+                verifyResult.ok
+                  ? "bg-green-50 border-green-200 text-green-800"
+                  : "bg-red-50 border-red-200 text-red-800"
+              }`}
+            >
+              {verifyResult.ok ? "✓ " : "✕ "}
+              {verifyResult.message}
+            </div>
+          )}
         </section>
 
         <section className="space-y-2 border-t pt-4">

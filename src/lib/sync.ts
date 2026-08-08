@@ -3,18 +3,32 @@
 // module just pushes whatever accumulated locally whenever a connection
 // happens to be available, so HR doesn't have to manually export/share data.
 //
-// One-way: device -> server for identity and attendance. The device is the
-// source of truth for worker identity (name/aadhar/photo/face/role) and all
-// attendance data. The one exception is role *names*: the server owns the
-// rate card (Amino Farms Wages > Roles) and piggybacks the current list of
-// role names on every sync response, purely so the enrollment form can
-// suggest existing roles — the rate itself is never sent here. See
+// Mostly one-way: device -> server for identity and attendance. The device
+// is the source of truth for worker identity (name/aadhar/photo/face/role)
+// and all attendance data — every sync pushes local changes up. Two
+// exceptions come back down, both piggybacked on the sync response rather
+// than needing their own poll: role *names* (the server owns the rate card,
+// Amino Farms Wages > Roles — the rate itself is never sent here), and, via
+// pullWorkerRoster() below, the full worker roster for THIS token, so a
+// reinstalled app / replacement phone can restore itself by re-entering the
+// same token instead of every worker being re-enrolled by hand. See
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
 import { getAll, get, put } from "./db";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 import type { DayOverride } from "./attendance";
 
 export const DEFAULT_SERVER_URL = "https://aminofarms.replit.app";
+
+// In dev (npm run dev), route through Vite's own /api proxy (see
+// vite.config.ts) instead of hitting the server directly from the browser.
+// The Amino Farms server rejects any request carrying a browser Origin
+// header, so a direct browser fetch always fails with "Failed to fetch"
+// even with a valid token — going through the proxy keeps the request
+// same-origin in the browser, and the proxy strips Origin before
+// forwarding server-side. Production builds still call serverUrl directly.
+function apiBase(serverUrl: string): string {
+  return import.meta.env.DEV ? "" : serverUrl;
+}
 
 interface DeviceConfig {
   key: "sync-config";
@@ -97,7 +111,62 @@ export async function pendingCounts(): Promise<{ employees: number; punches: num
 
 let syncing = false;
 
-export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?: number }> {
+interface ServerWorker {
+  id: string;
+  name: string;
+  aadharNumber: string;
+  photoDataUrl: string;
+  faceDescriptor: number[];
+  role: string | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+/** Device-recovery pull: re-downloads every worker this token has ever
+ * enrolled (see server/routes/wages.ts device-sync/workers on the Amino
+ * Farms side). Lets a reinstalled app / replacement phone restore its
+ * roster just by re-entering the same token, instead of re-enrolling
+ * everyone by hand. Best-effort — failing here must not fail a sync whose
+ * push already succeeded, so callers swallow the error themselves.
+ * Returns how many workers were written locally. */
+async function pullWorkerRoster(serverUrl: string, token: string): Promise<number> {
+  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/workers`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Roster pull responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const serverWorkers: ServerWorker[] = await res.json();
+
+  const localById = new Map((await getAll<Employee>("employees")).map((e) => [e.id, e]));
+  // A local row with no syncedAt is a pending local edit (new enrollment or
+  // an edit not yet pushed) — the pull must never clobber it.
+  const toWrite = serverWorkers.filter((w) => {
+    const local = localById.get(w.id);
+    return !local || local.syncedAt;
+  });
+
+  const pulledAt = Date.now();
+  await Promise.all(
+    toWrite.map((w) =>
+      put<Employee>("employees", {
+        id: w.id,
+        name: w.name,
+        aadharNumber: w.aadharNumber,
+        photoDataUrl: w.photoDataUrl,
+        faceDescriptor: w.faceDescriptor,
+        role: w.role,
+        isActive: w.isActive,
+        createdAt: new Date(w.createdAt).getTime(),
+        syncedAt: pulledAt, // pulled from the server, so already synced by definition
+      }),
+    ),
+  );
+  return toWrite.length;
+}
+
+export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?: number; restored?: number }> {
   if (syncing) return { ok: false, error: "Sync already in progress" };
   const config = await getDeviceConfig();
   if (!config) return { ok: false, error: "No device token configured yet" };
@@ -147,7 +216,7 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
       })),
     };
 
-    const res = await fetch(`${config.serverUrl}/api/wages/sync`, {
+    const res = await fetch(`${apiBase(config.serverUrl)}/api/wages/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
       body: JSON.stringify(payload),
@@ -170,8 +239,20 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
       ...overrides.map((o) => put("overrides", { ...o, syncedAt: now })),
     ]);
 
+    // Device recovery: after pushing, pull back every worker this token has
+    // ever enrolled. A no-op on a normal device (everything already matches
+    // locally); on a reinstalled app / replacement phone this is what
+    // repopulates the roster. Best-effort — a failed pull must not turn an
+    // otherwise-successful push into a reported failure.
+    let restored = 0;
+    try {
+      restored = await pullWorkerRoster(config.serverUrl, config.token);
+    } catch {
+      // swallow — push already succeeded, see comment above
+    }
+
     await setSyncStatus({ lastSuccessAt: now, lastError: null });
-    return { ok: true, synced: employees.length + punches.length + overrides.length };
+    return { ok: true, synced: employees.length + punches.length + overrides.length, restored };
   } catch (err: any) {
     const message = err?.message ?? String(err);
     await setSyncStatus({ lastError: message });
@@ -248,7 +329,7 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
   try {
     // Pull the roster first — the punch flow can't match a payroll
     // employee's face at all until it has descriptors to compare against.
-    const rosterRes = await fetch(`${config.serverUrl}/api/attendance-sync/employees`, {
+    const rosterRes = await fetch(`${apiBase(config.serverUrl)}/api/attendance-sync/employees`, {
       headers: { Authorization: `Bearer ${config.token}` },
     });
     if (!rosterRes.ok) {
@@ -274,7 +355,7 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
           matchScore: p.matchScore,
         })),
       };
-      const res = await fetch(`${config.serverUrl}/api/attendance-sync/punches`, {
+      const res = await fetch(`${apiBase(config.serverUrl)}/api/attendance-sync/punches`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
         body: JSON.stringify(payload),

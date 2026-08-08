@@ -4,3 +4,6 @@ android/
 .DS_Store
 *.log
 public/models/
+.claude/
+*.tsbuildinfo
+
