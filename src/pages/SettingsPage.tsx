@@ -10,9 +10,11 @@ import {
   getPayrollSyncStatus,
   payrollPendingCounts,
   syncPayrollNow,
+  getDeviceInfo,
   type SyncStatus,
   type PayrollSyncStatus,
 } from "../lib/sync";
+import { checkBackup, restoreFromBackup, type BackupMetadata } from "../lib/backup";
 import { lock } from "../lib/pin";
 
 function formatWhen(ts: number | null): string {
@@ -40,6 +42,10 @@ export default function SettingsPage() {
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ ok: boolean; message: string } | null>(null);
 
+  const [backupMeta, setBackupMeta] = useState<BackupMetadata | null>(null);
+  const [restoringBackup, setRestoringBackup] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<{ ok: boolean; message: string } | null>(null);
+
   async function refresh() {
     const [config, s, c, ps, pc] = await Promise.all([
       getDeviceConfig(),
@@ -56,22 +62,58 @@ export default function SettingsPage() {
     setCounts(c);
     setPayrollStatus(ps);
     setPayrollCounts(pc);
+    
+    if (config?.token) {
+      setBackupMeta(await checkBackup(config.token));
+    } else {
+      setBackupMeta(null);
+    }
   }
 
   useEffect(() => {
     refresh();
   }, []);
 
-  async function handleSaveConfig() {
-    if (!token.trim() && !savedToken) return;
-    const finalUrl = serverUrl.trim() || DEFAULT_SERVER_URL;
-    const finalToken = token.trim() || savedToken!;
+  useEffect(() => {
+    // Only check backup if we have a saved config with a deviceId
+    getDeviceConfig().then(config => {
+      if (config?.deviceId) {
+        checkBackup(config.deviceId).then(setBackupMeta);
+      } else {
+        setBackupMeta(null);
+      }
+    });
+  }, [savedToken]);
 
-    await setDeviceConfig(finalUrl, finalToken);
-    setSaved(true);
-    setToken("");
-    setVerifyResult(null);
+  async function handleVerifyToken() {
+    const finalUrl = serverUrl.trim() || DEFAULT_SERVER_URL;
+    const finalToken = token.trim() || savedToken;
+    if (!finalToken) return;
+
     setVerifying(true);
+    setVerifyResult(null);
+    try {
+      const devInfo = await getDeviceInfo(finalUrl, finalToken);
+      await setDeviceConfig(finalUrl, finalToken, devInfo.deviceId);
+      
+      const bMeta = await checkBackup(devInfo.deviceId);
+      setBackupMeta(bMeta);
+      
+      setVerifyResult({ ok: true, message: `Verified device: ${devInfo.name}.` });
+      setToken(""); // Clear input, it is now saved
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+      refresh();
+    } catch (err: any) {
+      setVerifyResult({ ok: false, message: `Verification failed: ${err.message}` });
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function handleSaveAndSync() {
+    setVerifying(true);
+    setVerifyResult(null);
 
     const [resWages, resPayroll] = await Promise.all([
       syncNow(),
@@ -82,15 +124,13 @@ export default function SettingsPage() {
     if (resWages.ok && resPayroll.ok) {
       const restored = resWages.restored ?? 0;
       const message = restored > 0
-        ? `Connected successfully! Restored ${restored} worker${restored === 1 ? "" : "s"} from the server.`
-        : "Connected successfully! Device token verified.";
+        ? `Synced successfully! Restored ${restored} worker${restored === 1 ? "" : "s"} from the server.`
+        : "Synced successfully!";
       setVerifyResult({ ok: true, message });
     } else {
-      const err = resWages.error || resPayroll.error || "Connection failed";
-      setVerifyResult({ ok: false, message: `Connection failed: ${err}` });
+      const err = resWages.error || resPayroll.error || "Sync failed";
+      setVerifyResult({ ok: false, message: `Sync failed: ${err}` });
     }
-
-    setTimeout(() => setSaved(false), 2000);
     refresh();
   }
 
@@ -114,6 +154,25 @@ export default function SettingsPage() {
     await syncPayrollNow();
     setPayrollSyncing(false);
     refresh();
+  }
+
+  async function handleRestoreBackup() {
+    const config = await getDeviceConfig();
+    if (!config?.deviceId) return;
+    
+    setRestoringBackup(true);
+    try {
+      const res = await restoreFromBackup(config.deviceId);
+      setRestoreResult({ 
+        ok: true, 
+        message: `Restored ${res.employees} workers, ${res.punches} punches, and ${res.overrides} corrections from local backup.` 
+      });
+      refresh();
+    } catch (err: any) {
+      setRestoreResult({ ok: false, message: `Failed to restore: ${err.message}` });
+    } finally {
+      setRestoringBackup(false);
+    }
   }
 
   return (
@@ -151,13 +210,20 @@ export default function SettingsPage() {
             />
           </label>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-col sm:flex-row">
             <button
-              onClick={handleSaveConfig}
-              disabled={!token.trim() && !savedToken || verifying}
+              onClick={handleVerifyToken}
+              disabled={(!token.trim() && !savedToken) || verifying}
+              className="flex-1 py-2.5 rounded-lg bg-gray-100 border text-gray-800 text-sm font-medium disabled:opacity-50"
+            >
+              {verifying ? "Verifying…" : saved ? "Verified!" : "Verify Token"}
+            </button>
+            <button
+              onClick={handleSaveAndSync}
+              disabled={!savedToken || verifying}
               className="flex-1 py-2.5 rounded-lg bg-brand text-white text-sm font-medium disabled:opacity-50"
             >
-              {verifying ? "Verifying…" : saved ? "Saved" : "Save"}
+              Save & Sync
             </button>
             {savedToken && (
               <button onClick={handleForget} className="px-3 py-2.5 rounded-lg border text-sm text-red-600">
@@ -183,6 +249,43 @@ export default function SettingsPage() {
             >
               {verifyResult.ok ? "✓ " : "✕ "}
               {verifyResult.message}
+            </div>
+          )}
+        </section>
+
+        <section className="space-y-3 border-t pt-4">
+          <h2 className="text-sm font-medium text-gray-700">Local Backup</h2>
+          
+          <div className="text-sm text-gray-600">
+            {backupMeta?.exists ? (
+              <>
+                <p className="text-green-600 font-medium">✓ Backup found for this token</p>
+                {backupMeta.savedAt && <p>Saved: {formatWhen(backupMeta.savedAt)}</p>}
+              </>
+            ) : (
+              <p>No local backup found for this device.</p>
+            )}
+          </div>
+          
+          <button
+            onClick={handleRestoreBackup}
+            disabled={!backupMeta?.exists || counts.employees > 0 || restoringBackup}
+            className="w-full py-2.5 rounded-lg border border-brand text-brand text-sm font-medium disabled:opacity-50"
+            title={counts.employees > 0 ? "Cannot restore when app already has workers" : undefined}
+          >
+            {restoringBackup ? "Restoring…" : "Restore from Backup"}
+          </button>
+
+          {restoreResult && (
+            <div
+              className={`p-3 border text-xs rounded-lg font-medium ${
+                restoreResult.ok
+                  ? "bg-green-50 border-green-200 text-green-800"
+                  : "bg-red-50 border-red-200 text-red-800"
+              }`}
+            >
+              {restoreResult.ok ? "✓ " : "✕ "}
+              {restoreResult.message}
             </div>
           )}
         </section>

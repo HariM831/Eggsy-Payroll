@@ -16,6 +16,7 @@
 import { getAll, get, put } from "./db";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 import type { DayOverride } from "./attendance";
+import { saveBackup } from "./backup";
 
 export const DEFAULT_SERVER_URL = "https://aminofarms.replit.app";
 
@@ -34,6 +35,7 @@ interface DeviceConfig {
   key: "sync-config";
   serverUrl: string;
   token: string;
+  deviceId?: string;
 }
 
 export interface SyncStatus {
@@ -43,18 +45,18 @@ export interface SyncStatus {
   lastError: string | null;
 }
 
-export async function getDeviceConfig(): Promise<{ serverUrl: string; token: string } | null> {
+export async function getDeviceConfig(): Promise<{ serverUrl: string; token: string; deviceId?: string } | null> {
   const cfg = await get<DeviceConfig>("meta", "sync-config");
   if (!cfg?.token) return null;
-  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token };
+  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token, deviceId: cfg.deviceId };
 }
 
-export async function setDeviceConfig(serverUrl: string, token: string): Promise<void> {
-  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token });
+export async function setDeviceConfig(serverUrl: string, token: string, deviceId?: string): Promise<void> {
+  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token, deviceId });
 }
 
 export async function clearDeviceConfig(): Promise<void> {
-  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: DEFAULT_SERVER_URL, token: "" });
+  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: DEFAULT_SERVER_URL, token: "", deviceId: undefined });
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
@@ -120,6 +122,17 @@ interface ServerWorker {
   role: string | null;
   isActive: boolean;
   createdAt: string;
+}
+
+export async function getDeviceInfo(serverUrl: string, token: string): Promise<{ deviceId: string; name: string }> {
+  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/info`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Device info fetch failed ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  return res.json();
 }
 
 /** Device-recovery pull: re-downloads every worker this token has ever
@@ -192,6 +205,7 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
         // best-effort
       }
       await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
+      if (config.deviceId) saveBackup(config.deviceId);
       return { ok: true, synced: 0, restored };
     }
 
@@ -260,6 +274,7 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
     }
 
     await setSyncStatus({ lastSuccessAt: now, lastError: null });
+    if (config.deviceId) saveBackup(config.deviceId);
     return { ok: true, synced: employees.length + punches.length + overrides.length, restored };
   } catch (err: any) {
     const message = err?.message ?? String(err);

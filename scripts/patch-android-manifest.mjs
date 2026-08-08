@@ -16,6 +16,8 @@ const needed = [
   '<uses-permission android:name="android.permission.CAMERA" />',
   '<uses-feature android:name="android.hardware.camera" android:required="true" />',
   '<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />',
+  '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />',
+  '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />',
 ];
 
 let changed = false;
