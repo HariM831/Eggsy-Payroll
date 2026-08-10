@@ -99,6 +99,10 @@ export async function del(storeName: string, key: IDBValidKey): Promise<void> {
   await tx(storeName, "readwrite", (store) => store.delete(key));
 }
 
+export async function clear(storeName: string): Promise<void> {
+  await tx(storeName, "readwrite", (store) => store.clear());
+}
+
 export async function getByIndex<T>(
   storeName: string,
   indexName: string,

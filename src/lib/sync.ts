@@ -13,7 +13,7 @@
 // reinstalled app / replacement phone can restore itself by re-entering the
 // same token instead of every worker being re-enrolled by hand. See
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
-import { getAll, get, put } from "./db";
+import { getAll, get, put, del, clear } from "./db";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 import type { DayOverride } from "./attendance";
 import { saveBackup } from "./backup";
@@ -36,6 +36,7 @@ interface DeviceConfig {
   serverUrl: string;
   token: string;
   deviceId?: string;
+  deviceName?: string;
 }
 
 export interface SyncStatus {
@@ -45,18 +46,18 @@ export interface SyncStatus {
   lastError: string | null;
 }
 
-export async function getDeviceConfig(): Promise<{ serverUrl: string; token: string; deviceId?: string } | null> {
+export async function getDeviceConfig(): Promise<{ serverUrl: string; token: string; deviceId?: string; deviceName?: string } | null> {
   const cfg = await get<DeviceConfig>("meta", "sync-config");
   if (!cfg?.token) return null;
-  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token, deviceId: cfg.deviceId };
+  return { serverUrl: cfg.serverUrl || DEFAULT_SERVER_URL, token: cfg.token, deviceId: cfg.deviceId, deviceName: cfg.deviceName };
 }
 
-export async function setDeviceConfig(serverUrl: string, token: string, deviceId?: string): Promise<void> {
-  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token, deviceId });
+export async function setDeviceConfig(serverUrl: string, token: string, deviceId?: string, deviceName?: string): Promise<void> {
+  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: serverUrl || DEFAULT_SERVER_URL, token, deviceId, deviceName });
 }
 
 export async function clearDeviceConfig(): Promise<void> {
-  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: DEFAULT_SERVER_URL, token: "", deviceId: undefined });
+  await put<DeviceConfig>("meta", { key: "sync-config", serverUrl: DEFAULT_SERVER_URL, token: "", deviceId: undefined, deviceName: undefined });
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
@@ -133,6 +134,41 @@ export async function getDeviceInfo(serverUrl: string, token: string): Promise<{
     throw new Error(`Device info fetch failed ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
   }
   return res.json();
+}
+
+/** Read-only preview of how many workers exist on the server for a token,
+ * WITHOUT writing anything locally — for showing "N workers will be
+ * restored" before committing to a token switch. Uses the same roster
+ * endpoint as pullWorkerRoster(); best-effort callers should catch. */
+export async function peekWorkerRosterCount(serverUrl: string, token: string): Promise<number> {
+  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/workers`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Roster check responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const workers = await res.json();
+  return Array.isArray(workers) ? workers.length : 0;
+}
+
+/** Clears every store scoped to "this device's identity" — Wages workers,
+ * punches, corrections, the cached role list, and the payroll roster
+ * mirror + its punches (payroll data is keyed by the same shared token,
+ * see the module comment below on syncPayrollNow). Called when the saved
+ * token is being replaced with a genuinely different one, so a previous
+ * farm/device's data never lingers mixed in with the new one. Does NOT
+ * touch the PIN or the device config itself — callers overwrite that
+ * separately right after. */
+export async function wipeLocalDeviceData(): Promise<void> {
+  await Promise.all([
+    clear("employees"),
+    clear("punches"),
+    clear("overrides"),
+    clear("payrollEmployees"),
+    clear("payrollPunches"),
+  ]);
+  await del("meta", "cached-roles");
 }
 
 /** Device-recovery pull: re-downloads every worker this token has ever

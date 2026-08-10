@@ -11,6 +11,8 @@ import {
   payrollPendingCounts,
   syncPayrollNow,
   getDeviceInfo,
+  peekWorkerRosterCount,
+  wipeLocalDeviceData,
   type SyncStatus,
   type PayrollSyncStatus,
 } from "../lib/sync";
@@ -23,6 +25,14 @@ function formatWhen(ts: number | null): string {
   if (diffSec < 60) return `${diffSec}s ago`;
   if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
   return new Date(ts).toLocaleString("en-IN");
+}
+
+/** Shows only enough of a token to tell devices apart at a glance — not a
+ * secret reveal, this device's actual token is already sitting in its own
+ * local storage regardless. */
+function maskToken(t: string): string {
+  if (t.length <= 4) return "•".repeat(t.length);
+  return `••••••••${t.slice(-4)}`;
 }
 
 export default function SettingsPage() {
@@ -46,6 +56,11 @@ export default function SettingsPage() {
   const [restoringBackup, setRestoringBackup] = useState(false);
   const [restoreResult, setRestoreResult] = useState<{ ok: boolean; message: string } | null>(null);
 
+  // The device's own name from the server (e.g. "Nabil gate") — shown next
+  // to the masked token so it's obvious which physical device/identity is
+  // currently configured, without having to re-verify to find out.
+  const [deviceName, setDeviceName] = useState<string | null>(null);
+
   async function refresh() {
     const [config, s, c, ps, pc] = await Promise.all([
       getDeviceConfig(),
@@ -57,17 +72,13 @@ export default function SettingsPage() {
     if (config) {
       setServerUrl(config.serverUrl);
       setSavedToken(config.token);
+      // Load the name from saved config — no server call needed
+      if (config.deviceName) setDeviceName(config.deviceName);
     }
     setStatus(s);
     setCounts(c);
     setPayrollStatus(ps);
     setPayrollCounts(pc);
-    
-    if (config?.token) {
-      setBackupMeta(await checkBackup(config.token));
-    } else {
-      setBackupMeta(null);
-    }
   }
 
   useEffect(() => {
@@ -75,13 +86,13 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    // Only check backup if we have a saved config with a deviceId
-    getDeviceConfig().then(config => {
-      if (config?.deviceId) {
-        checkBackup(config.deviceId).then(setBackupMeta);
-      } else {
+    // Re-derive backup status whenever the saved token changes
+    getDeviceConfig().then((config) => {
+      if (!config?.deviceId) {
         setBackupMeta(null);
+        return;
       }
+      checkBackup(config.deviceId).then(setBackupMeta);
     });
   }, [savedToken]);
 
@@ -90,17 +101,54 @@ export default function SettingsPage() {
     const finalToken = token.trim() || savedToken;
     if (!finalToken) return;
 
+    // A genuinely different token means a different device/farm identity —
+    // not just re-verifying the one already configured.
+    const isSwitch = !!savedToken && finalToken !== savedToken;
+
     setVerifying(true);
     setVerifyResult(null);
     try {
       const devInfo = await getDeviceInfo(finalUrl, finalToken);
-      await setDeviceConfig(finalUrl, finalToken, devInfo.deviceId);
-      
+
+      if (isSwitch) {
+        const [pending, payrollPending] = await Promise.all([pendingCounts(), payrollPendingCounts()]);
+        const unsyncedTotal = pending.total + payrollPending.punches;
+        if (unsyncedTotal > 0) {
+          const proceed = confirm(
+            `This device has ${unsyncedTotal} unsynced record${unsyncedTotal === 1 ? "" : "s"} that ` +
+            `${unsyncedTotal === 1 ? "hasn't" : "haven't"} been pushed yet. Switching to "${devInfo.name}" ` +
+            `will permanently discard ${unsyncedTotal === 1 ? "it" : "them"}. Continue?`
+          );
+          if (!proceed) { setVerifying(false); return; }
+        }
+
+        let backupCount: number | null = null;
+        try {
+          backupCount = await peekWorkerRosterCount(finalUrl, finalToken);
+        } catch {
+          // best-effort — a failed preview shouldn't block the switch itself
+        }
+        const backupLine = backupCount === null
+          ? `Switching to "${devInfo.name}".`
+          : backupCount > 0
+            ? `Switching to "${devInfo.name}" — ${backupCount} worker${backupCount === 1 ? "" : "s"} will be restored from the server.`
+            : `Switching to "${devInfo.name}" — no workers found on the server for this token yet.`;
+        if (!confirm(`${backupLine}\n\nThis device's current local data will be cleared first (already-synced data is safe on the server). Continue?`)) {
+          setVerifying(false);
+          return;
+        }
+
+        await wipeLocalDeviceData();
+      }
+
+      await setDeviceConfig(finalUrl, finalToken, devInfo.deviceId, devInfo.name);
+
       const bMeta = await checkBackup(devInfo.deviceId);
       setBackupMeta(bMeta);
-      
-      setVerifyResult({ ok: true, message: `Verified device: ${devInfo.name}.` });
-      setToken(""); // Clear input, it is now saved
+      setDeviceName(devInfo.name);
+
+      setVerifyResult({ ok: true, message: `Verified as: ${devInfo.name}.` });
+      setToken("");
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       refresh();
@@ -191,20 +239,18 @@ export default function SettingsPage() {
             Server URL
             <input
               value={serverUrl}
-              onChange={(e) => setServerUrl(e.target.value)}
-              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+              readOnly
+              disabled
+              className="mt-1 w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-400 cursor-not-allowed"
             />
           </label>
 
           <label className="text-sm block">
             Device token
-            {savedToken && !token && (
-              <p className="text-xs text-green-600 mb-1">A token is saved (hidden). Enter a new one to replace it.</p>
-            )}
             <input
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder={savedToken ? "•••• saved — paste a new token to replace" : "Paste the token from Wages > Devices"}
+              placeholder={savedToken ? "Paste a new token to replace" : "Paste the token from Wages > Devices"}
               className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-mono"
               type="password"
             />
@@ -231,6 +277,20 @@ export default function SettingsPage() {
               </button>
             )}
           </div>
+
+          {/* Persistent device identity badge */}
+          {savedToken && !token && (deviceName || savedToken) && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+              <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-brand/10 text-brand text-xs font-bold shrink-0">
+                {(deviceName ?? "?")[0].toUpperCase()}
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-gray-800 truncate">{deviceName ?? "Unknown device"}</p>
+                <p className="text-[10px] text-gray-400 font-mono">{maskToken(savedToken)}</p>
+              </div>
+              <span className="ml-auto text-[10px] text-green-600 font-medium shrink-0">● Active</span>
+            </div>
+          )}
 
           {verifying && (
             <div className="p-3 bg-blue-50 border border-blue-200 text-blue-700 text-xs rounded-lg flex items-center gap-2">
