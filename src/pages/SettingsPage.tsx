@@ -170,9 +170,14 @@ export default function SettingsPage() {
 
     setVerifying(false);
     if (resWages.ok && resPayroll.ok) {
-      const restored = resWages.restored ?? 0;
-      const message = restored > 0
-        ? `Synced successfully! Restored ${restored} worker${restored === 1 ? "" : "s"} from the server.`
+      const workers = resWages.restored ?? 0;
+      const punches = resWages.restoredPunches ?? 0;
+      const parts = [
+        workers > 0 ? `${workers} worker${workers === 1 ? "" : "s"}` : null,
+        punches > 0 ? `${punches} attendance record${punches === 1 ? "" : "s"}` : null,
+      ].filter(Boolean);
+      const message = parts.length > 0
+        ? `Synced successfully! Restored ${parts.join(" and ")} from the server.`
         : "Synced successfully!";
       setVerifyResult({ ok: true, message });
     } else {

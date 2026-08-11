@@ -14,7 +14,8 @@
 // same token instead of every worker being re-enrolled by hand. See
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
 import { getAll, get, put, del, clear } from "./db";
-import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
+import { localDate } from "./id";
+import type { Employee, Punch, PayrollEmployee, PayrollPunch, LastPunchToday, PunchType, PunchMethod } from "../types";
 import type { DayOverride } from "./attendance";
 import { saveBackup } from "./backup";
 
@@ -168,7 +169,115 @@ export async function wipeLocalDeviceData(): Promise<void> {
     clear("payrollEmployees"),
     clear("payrollPunches"),
   ]);
-  await del("meta", "cached-roles");
+  await Promise.all([
+    del("meta", "cached-roles"),
+    // so the new identity restores its own attendance history
+    del("meta", "attendance-pulled"),
+  ]);
+}
+
+/** How far back attendance history is restored. The server caps the window
+ * at 90 days (MAX_HISTORY_DAYS in server/routes/wages.ts) — asking for more
+ * is a 400, so these two must stay in step. */
+const HISTORY_DAYS = 90;
+
+interface AttendancePulledFlag {
+  key: "attendance-pulled";
+  deviceId: string;
+  at: number;
+}
+
+interface ServerPunch {
+  id: string;
+  employeeId: string;
+  punchType: PunchType;
+  punchDate: string;
+  timestamp: number;
+  method: PunchMethod;
+  matchScore: number | null;
+}
+
+interface ServerOverride {
+  key: string;
+  employeeId: string;
+  date: string;
+  status: "P" | "A";
+  note: string;
+  setAt: number;
+}
+
+/** Restores attendance history so a rebuilt device's Calendar isn't blank —
+ * the roster pull brings back WHO was enrolled, this brings back their days.
+ *
+ * Deliberately not run on every sync like the roster is: this is up to 90
+ * days of punches for every worker, and the scheduler ticks every 10s during
+ * a rush window. It runs once per device instead, tracked by the
+ * "attendance-pulled" meta flag, which wipeLocalDeviceData() clears so a
+ * token switch re-pulls for the new identity.
+ *
+ * Punches restored this way have no capturedPhotoDataUrl — the per-punch
+ * audit photo is never uploaded, so it only ever exists on the phone that
+ * took it (the local encrypted backup does preserve it; see backup.ts). */
+async function pullAttendanceHistory(serverUrl: string, token: string): Promise<{ punches: number; overrides: number }> {
+  const to = localDate();
+  const from = localDate(new Date(Date.now() - (HISTORY_DAYS - 1) * 86_400_000));
+
+  const res = await fetch(
+    `${apiBase(serverUrl)}/api/wages/device-sync/punches?from=${from}&to=${to}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Attendance pull responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const body = await res.json();
+  const serverPunches: ServerPunch[] = Array.isArray(body?.punches) ? body.punches : [];
+  const serverOverrides: ServerOverride[] = Array.isArray(body?.overrides) ? body.overrides : [];
+
+  // Same rule as the roster pull: a local row with no syncedAt is a pending
+  // local change that hasn't reached the server yet, so it must win.
+  const localPunches = new Map((await getAll<Punch>("punches")).map((p) => [p.id, p]));
+  const localOverrides = new Map((await getAll<DayOverride>("overrides")).map((o) => [o.key, o]));
+
+  const punchesToWrite = serverPunches.filter((p) => {
+    const local = localPunches.get(p.id);
+    return !local || local.syncedAt;
+  });
+  const overridesToWrite = serverOverrides.filter((o) => {
+    const local = localOverrides.get(o.key);
+    return !local || local.syncedAt;
+  });
+
+  const pulledAt = Date.now();
+  await Promise.all([
+    ...punchesToWrite.map((p) =>
+      put<Punch>("punches", {
+        id: p.id,
+        employeeId: p.employeeId,
+        punchType: p.punchType,
+        timestamp: p.timestamp,
+        punchDate: p.punchDate,
+        method: p.method,
+        matchScore: p.matchScore,
+        capturedPhotoDataUrl: null, // never uploaded — see the note above
+        note: null,
+        syncedAt: pulledAt, // came from the server, so already synced by definition
+      }),
+    ),
+    ...overridesToWrite.map((o) =>
+      put<DayOverride>("overrides", {
+        key: o.key,
+        employeeId: o.employeeId,
+        date: o.date,
+        status: o.status,
+        note: o.note ?? "",
+        setAt: o.setAt,
+        syncedAt: pulledAt,
+      }),
+    ),
+  ]);
+
+  return { punches: punchesToWrite.length, overrides: overridesToWrite.length };
 }
 
 /** Device-recovery pull: re-downloads every worker this token has ever
@@ -215,7 +324,51 @@ async function pullWorkerRoster(serverUrl: string, token: string): Promise<numbe
   return toWrite.length;
 }
 
-export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?: number; restored?: number }> {
+/** Everything this device restores FROM the server: the worker roster, plus
+ * — once per device — the attendance history behind it. Best-effort
+ * throughout: a restore that fails must never turn a sync whose push already
+ * succeeded into a reported failure, so each half swallows its own error and
+ * simply reports having restored nothing. */
+async function restoreFromServer(
+  serverUrl: string,
+  token: string,
+  deviceId?: string,
+): Promise<{ workers: number; punches: number; overrides: number }> {
+  const restored = { workers: 0, punches: 0, overrides: 0 };
+
+  try {
+    restored.workers = await pullWorkerRoster(serverUrl, token);
+  } catch {
+    // best-effort — see above
+  }
+
+  // Attendance is up to 90 days of punches across every worker, so unlike the
+  // roster it must not ride every scheduler tick (10s during a rush window).
+  // Once per device is enough: nothing else writes this device's history.
+  try {
+    const flag = await get<AttendancePulledFlag>("meta", "attendance-pulled");
+    if (!flag || (deviceId && flag.deviceId !== deviceId)) {
+      const pulled = await pullAttendanceHistory(serverUrl, token);
+      restored.punches = pulled.punches;
+      restored.overrides = pulled.overrides;
+      await put<AttendancePulledFlag>("meta", { key: "attendance-pulled", deviceId: deviceId ?? "", at: Date.now() });
+    }
+  } catch {
+    // best-effort — the flag stays unset, so the next sync simply retries
+  }
+
+  return restored;
+}
+
+export async function syncNow(): Promise<{
+  ok: boolean;
+  error?: string;
+  synced?: number;
+  /** workers written back from the server's roster */
+  restored?: number;
+  /** punches written back from the server's attendance history */
+  restoredPunches?: number;
+}> {
   if (syncing) return { ok: false, error: "Sync already in progress" };
   const config = await getDeviceConfig();
   if (!config) return { ok: false, error: "No device token configured yet" };
@@ -232,17 +385,12 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
     const nothingPending = employees.length === 0 && punches.length === 0 && overrides.length === 0;
     const rolesCached = (await getCachedRoles()).length > 0;
     if (nothingPending && rolesCached) {
-      // Nothing to push, but still pull the roster in case this is a
-      // reinstalled / replacement device that needs its workers restored.
-      let restored = 0;
-      try {
-        restored = await pullWorkerRoster(config.serverUrl, config.token);
-      } catch {
-        // best-effort
-      }
+      // Nothing to push, but still restore in case this is a reinstalled /
+      // replacement device that needs its workers and history back.
+      const restored = await restoreFromServer(config.serverUrl, config.token, config.deviceId);
       await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
       if (config.deviceId) saveBackup(config.deviceId);
-      return { ok: true, synced: 0, restored };
+      return { ok: true, synced: 0, restored: restored.workers, restoredPunches: restored.punches };
     }
 
     const payload = {
@@ -297,21 +445,21 @@ export async function syncNow(): Promise<{ ok: boolean; error?: string; synced?:
       ...overrides.map((o) => put("overrides", { ...o, syncedAt: now })),
     ]);
 
-    // Device recovery: after pushing, pull back every worker this token has
-    // ever enrolled. A no-op on a normal device (everything already matches
-    // locally); on a reinstalled app / replacement phone this is what
-    // repopulates the roster. Best-effort — a failed pull must not turn an
-    // otherwise-successful push into a reported failure.
-    let restored = 0;
-    try {
-      restored = await pullWorkerRoster(config.serverUrl, config.token);
-    } catch {
-      // swallow — push already succeeded, see comment above
-    }
+    // Device recovery: pull back this token's workers (and, once, their
+    // history) only AFTER the push, so anything pending locally reaches the
+    // server before the server's copy is read back. A no-op on a normal
+    // device; on a reinstalled app / replacement phone it repopulates
+    // everything. Best-effort — see restoreFromServer.
+    const restored = await restoreFromServer(config.serverUrl, config.token, config.deviceId);
 
     await setSyncStatus({ lastSuccessAt: now, lastError: null });
     if (config.deviceId) saveBackup(config.deviceId);
-    return { ok: true, synced: employees.length + punches.length + overrides.length, restored };
+    return {
+      ok: true,
+      synced: employees.length + punches.length + overrides.length,
+      restored: restored.workers,
+      restoredPunches: restored.punches,
+    };
   } catch (err: any) {
     const message = err?.message ?? String(err);
     await setSyncStatus({ lastError: message });
@@ -374,6 +522,9 @@ interface RosterEmployee {
   designation: string | null;
   faceDescriptor: number[] | null;
   recentEmbeddings: number[][];
+  /** Server's view of today's latest punch — see LastPunchToday in types.ts
+   * and nextPayrollPunchType() in punches.ts. */
+  lastPunchToday?: LastPunchToday | null;
 }
 
 let payrollSyncing = false;
@@ -423,7 +574,23 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
         const body = await res.text().catch(() => "");
         throw new Error(`Server responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
       }
-      await Promise.all(punches.map((p) => put("payrollPunches", { ...p, syncedAt: now })));
+
+      // The server relabels a punch whose in/out it can tell was wrong —
+      // this device decides in/out from what it can see, which offline
+      // excludes the kiosk and any other phone. Adopt those corrections so
+      // the local record matches what was actually recorded centrally, and
+      // so the next punch alternates from the corrected state rather than
+      // re-deriving the same mistake. See server/routes/payroll-attendance-sync.ts.
+      const body = await res.json().catch(() => null);
+      const corrected: { id: string; to: PunchType }[] = Array.isArray(body?.corrected) ? body.corrected : [];
+      const correctedById = new Map(corrected.map((c) => [c.id, c.to]));
+
+      await Promise.all(
+        punches.map((p) => {
+          const to = correctedById.get(p.id);
+          return put("payrollPunches", { ...p, punchType: to ?? p.punchType, syncedAt: now });
+        }),
+      );
     }
 
     await setPayrollSyncStatus({ lastSuccessAt: now, lastError: null });

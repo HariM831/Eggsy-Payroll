@@ -40,6 +40,16 @@ export interface Punch {
 // enrolled ON this device), this device never creates or edits these rows —
 // the server owns identity and enrollment (main app's face-enrollment
 // page); the device only pulls the roster to match punches against.
+/** The employee's latest punch today according to the SERVER — so it also
+ * covers punches this device never saw, made at the main app's browser gate
+ * kiosk or on another phone. */
+export interface LastPunchToday {
+  punchType: PunchType;
+  /** unix ms */
+  timestamp: number;
+  punchDate: string;
+}
+
 export interface PayrollEmployee {
   id: string;
   empCode: string;
@@ -49,6 +59,10 @@ export interface PayrollEmployee {
   faceDescriptor: number[] | null;
   /** Day-diverse recent live-capture embeddings from the server, for matching tolerance. */
   recentEmbeddings: number[][];
+  /** Latest punch the server knows about for today, used to decide whether
+   * the next punch is an in or an out. Optional: rows cached before this
+   * field existed, and days with no punch yet, both leave it absent/null. */
+  lastPunchToday?: LastPunchToday | null;
   /** unix ms this roster row was last pulled from the server. */
   cachedAt: number;
 }
