@@ -2,6 +2,13 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
+// Which server `npm run dev` talks to. Defaults to production; point it at a
+// Replit dev workspace to try server changes that aren't deployed yet:
+//   API_TARGET=https://<workspace>.replit.dev npm run dev
+// Dev-only — production builds always call the server URL saved in Settings
+// (see apiBase() in src/lib/sync.ts), never this.
+const API_TARGET = process.env.API_TARGET || "https://aminofarms.replit.app";
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -12,7 +19,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "https://aminofarms.replit.app",
+        target: API_TARGET,
         changeOrigin: true,
         secure: true,
         // The server rejects requests carrying a browser Origin header
