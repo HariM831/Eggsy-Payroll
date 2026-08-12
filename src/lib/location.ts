@@ -26,38 +26,75 @@ const MAX_AGE_MS = 5 * 60_000;
 let latest: CachedFix | null = null;
 let requesting = false;
 
+export interface LocationStatus {
+  ok: boolean;
+  /** Human-readable outcome — either the native error (e.g. "Location
+   * services are not enabled") or a success summary. This is exactly what
+   * used to be swallowed silently; keeping it is what makes a GPS problem
+   * visible on the phone itself instead of only traceable from source. */
+  message: string;
+  at: number;
+}
+
+let lastStatus: LocationStatus | null = null;
+
+/** Whatever the last attempt (from either primeLocation or checkLocationNow)
+ * actually found, or null if nothing has run yet this session. Settings
+ * reads this to show a diagnostic instead of a silent failure. */
+export function getLocationStatus(): LocationStatus | null {
+  return lastStatus;
+}
+
+/** The actual fix attempt, shared by both entry points below so the
+ * diagnostic always reflects the real permission/GPS-off/timeout path a
+ * punch would have hit — not a separate, possibly-different check. */
+async function attemptFix(): Promise<void> {
+  try {
+    const perm = await Geolocation.checkPermissions();
+    if (perm.location !== "granted") {
+      const result = await Geolocation.requestPermissions();
+      if (result.location !== "granted") {
+        lastStatus = { ok: false, message: "Location permission denied", at: Date.now() };
+        return;
+      }
+    }
+
+    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 });
+    latest = {
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+      accuracy: pos.coords.accuracy,
+      at: Date.now(),
+    };
+    lastStatus = { ok: true, message: `Accurate to ${Math.round(pos.coords.accuracy)}m`, at: Date.now() };
+  } catch (err: any) {
+    // The one place this used to be a bare `catch {}` — e.g. Android's
+    // Geolocation plugin rejects with "Location services are not enabled"
+    // when the phone's system Location toggle is off, *before* it would
+    // ever show a permission dialog. That reason is worth keeping.
+    lastStatus = { ok: false, message: err?.message ?? String(err), at: Date.now() };
+  }
+}
+
 /** Kicks off a location fix in the background. Call once per punch-screen
  * visit (and again after each punch, so the next person gets a fresh-ish
- * fix) — never awaited, never throws. Every failure mode (permission
- * denied, GPS off, no signal, timeout) is swallowed here so a punch can
- * never be blocked or broken by location trouble. */
+ * fix) — never awaited, never throws; a punch must never be blocked or
+ * broken by location trouble. The outcome still lands in getLocationStatus()
+ * for Settings to show, even though nothing here waits on it. */
 export function primeLocation(): void {
   if (requesting) return;
   requesting = true;
+  attemptFix().finally(() => {
+    requesting = false;
+  });
+}
 
-  (async () => {
-    try {
-      const perm = await Geolocation.checkPermissions();
-      if (perm.location !== "granted") {
-        const result = await Geolocation.requestPermissions();
-        if (result.location !== "granted") return;
-      }
-
-      const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 });
-      latest = {
-        latitude: pos.coords.latitude,
-        longitude: pos.coords.longitude,
-        accuracy: pos.coords.accuracy,
-        at: Date.now(),
-      };
-    } catch {
-      // Permission denied / GPS off / no signal / timed out — leave
-      // `latest` as whatever it already was; staleness is handled by
-      // getCachedLocation(), not by clearing it here.
-    } finally {
-      requesting = false;
-    }
-  })();
+/** For Settings' "Check location" button — runs the same attempt as
+ * primeLocation() but awaited, so the UI can show a definitive result
+ * immediately instead of polling getLocationStatus(). */
+export async function checkLocationNow(): Promise<LocationStatus> {
+  await attemptFix();
+  return lastStatus!;
 }
 
 /** Whatever fix is currently available and fresh enough, or null. Pure,

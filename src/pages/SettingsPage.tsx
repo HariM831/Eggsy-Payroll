@@ -17,7 +17,9 @@ import {
   type PayrollSyncStatus,
 } from "../lib/sync";
 import { checkBackup, restoreFromBackup, type BackupMetadata } from "../lib/backup";
+import { checkLocationNow, getLocationStatus, type LocationStatus } from "../lib/location";
 import { lock } from "../lib/pin";
+import { NativeSettings, AndroidSettings } from "capacitor-native-settings";
 
 function formatWhen(ts: number | null): string {
   if (!ts) return "never";
@@ -55,6 +57,12 @@ export default function SettingsPage() {
   const [backupMeta, setBackupMeta] = useState<BackupMetadata | null>(null);
   const [restoringBackup, setRestoringBackup] = useState(false);
   const [restoreResult, setRestoreResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // Whatever the punch flow's own location attempts have found so far (may
+  // be null — nobody's opened Punch yet this session), refreshed on demand
+  // by handleCheckLocation below.
+  const [locationStatus, setLocationStatus] = useState<LocationStatus | null>(getLocationStatus());
+  const [checkingLocation, setCheckingLocation] = useState(false);
 
   // The device's own name from the server (e.g. "Nabil gate") — shown next
   // to the masked token so it's obvious which physical device/identity is
@@ -209,6 +217,13 @@ export default function SettingsPage() {
     refresh();
   }
 
+  async function handleCheckLocation() {
+    setCheckingLocation(true);
+    const result = await checkLocationNow();
+    setLocationStatus(result);
+    setCheckingLocation(false);
+  }
+
   async function handleRestoreBackup() {
     const config = await getDeviceConfig();
     if (!config?.deviceId) return;
@@ -319,6 +334,32 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-3 border-t pt-4">
+          <h2 className="text-sm font-medium text-gray-700">Location</h2>
+          <p className="text-xs text-gray-400">
+            Punches carry GPS the same way the browser kiosk does. If this shows an error,
+            that's exactly why recent punches from this device have no location attached.
+          </p>
+
+          {locationStatus && (
+            <div
+              className={`text-sm ${locationStatus.ok ? "text-green-600" : "text-red-600"}`}
+            >
+              {locationStatus.ok ? "✓ " : "✕ "}
+              {locationStatus.message}
+              <span className="text-gray-400"> · {formatWhen(locationStatus.at)}</span>
+            </div>
+          )}
+
+          <button
+            onClick={handleCheckLocation}
+            disabled={checkingLocation}
+            className="w-full py-2.5 rounded-lg border border-brand text-brand text-sm font-medium disabled:opacity-50"
+          >
+            {checkingLocation ? "Checking…" : "Check location"}
+          </button>
+        </section>
+
+        <section className="space-y-3 border-t pt-4">
           <h2 className="text-sm font-medium text-gray-700">Local Backup</h2>
           
           <div className="text-sm text-gray-600">
@@ -336,16 +377,28 @@ export default function SettingsPage() {
               an uninstall, which Android gates behind a permission it refuses
               to show an in-app prompt for — so the only way to explain it is
               here. Shown until a backup actually exists, since a missing one
-              is almost always this. */}
+              is almost always this. The button below can only jump to this
+              app's own info screen (ACTION_APPLICATION_DETAILS_SETTINGS) —
+              Android has no intent for the exact toggle, so the last couple
+              of taps are unavoidably manual. */}
           {!backupMeta?.exists && (
-            <p className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed">
-              Backups are saved outside the app so they survive uninstalling it. Android
-              needs permission for that, and it can't be asked for from inside the app —
-              turn on <span className="font-medium">All files access</span> once under
-              Settings &gt; Apps &gt; Niko-Payroll &gt; Special app access, then sync.
-            </p>
+            <div className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed space-y-2">
+              <p>
+                Backups are saved outside the app so they survive uninstalling it. Android
+                needs permission for that, and it can't be asked for from inside the app —
+                turn on <span className="font-medium">All files access</span>, then sync.
+              </p>
+              <button
+                onClick={() =>
+                  NativeSettings.openAndroid({ option: AndroidSettings.ApplicationDetails }).catch(() => {})
+                }
+                className="w-full py-2 rounded-lg border border-gray-300 text-gray-700 text-xs font-medium"
+              >
+                Open app settings → Permissions → Files and media → Allow all files
+              </button>
+            </div>
           )}
-          
+
           <button
             onClick={handleRestoreBackup}
             disabled={!backupMeta?.exists || counts.employees > 0 || restoringBackup}
