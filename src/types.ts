@@ -31,6 +31,12 @@ export interface Punch {
   capturedPhotoDataUrl: string | null;
   /** set when HR manually corrects/creates a punch after the fact */
   note: string | null;
+  /** GPS at punch time — null if location was denied/unavailable/timed out, or
+   * for a manual punch. Best-effort: never blocks the punch itself. */
+  latitude: number | null;
+  longitude: number | null;
+  /** metres, as reported by the OS */
+  accuracy: number | null;
   /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
   syncedAt?: number;
 }
@@ -78,6 +84,11 @@ export interface PayrollPunch {
   punchDate: string;
   method: PunchMethod;
   matchScore: number | null;
+  /** GPS at punch time — null if location was denied/unavailable/timed out. */
+  latitude: number | null;
+  longitude: number | null;
+  /** metres, as reported by the OS */
+  accuracy: number | null;
   /** Set once this record has been pushed to aminofarms.replit.app. Absent/false = pending sync. */
   syncedAt?: number;
 }

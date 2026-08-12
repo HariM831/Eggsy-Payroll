@@ -1,6 +1,7 @@
 // `npx cap add android` generates AndroidManifest.xml fresh every time (the
 // android/ project isn't committed — see .gitignore). This script patches in
-// the CAMERA permission the punch/enrollment screens need, right after
+// the permissions the punch/enrollment screens need — camera always, plus
+// location for the GPS tag attached to each punch — right after
 // `cap add android` runs. Idempotent: safe to run more than once.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
@@ -18,6 +19,14 @@ const needed = [
   '<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />',
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />',
   '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />',
+  // Coarse is requested alongside fine because Android's permission dialog
+  // offers "approximate" as a user-chosen downgrade from "precise" — the app
+  // must declare both or that dialog option silently fails. GPS itself
+  // (used for the accuracy fine gives) is not required=true on the
+  // <uses-feature> below, since a punch should still work without it.
+  '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+  '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+  '<uses-feature android:name="android.hardware.location.gps" android:required="false" />',
 ];
 
 let changed = false;
@@ -30,7 +39,7 @@ for (const line of needed) {
 
 if (changed) {
   writeFileSync(manifestPath, xml);
-  console.log("[patch-android-manifest] added camera permission/features.");
+  console.log("[patch-android-manifest] added camera/location permissions and features.");
 } else {
   console.log("[patch-android-manifest] already up to date.");
 }

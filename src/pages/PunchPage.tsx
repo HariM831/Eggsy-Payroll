@@ -4,6 +4,7 @@ import { listEmployees } from "../lib/employees";
 import { listPayrollEmployees } from "../lib/payrollEmployees";
 import { recordPunch, recordPayrollPunch } from "../lib/punches";
 import { syncSoon, syncPayrollSoon } from "../lib/sync";
+import { primeLocation, getCachedLocation } from "../lib/location";
 import { findBestMatchInGalleries, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchGallery } from "../lib/face";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 
@@ -22,6 +23,12 @@ export default function PunchPage() {
   useEffect(() => {
     listEmployees().then(setWageEmployees);
     listPayrollEmployees().then(setPayrollEmployees);
+    // Fired now, not at punch time — a GPS fix can take seconds, and by
+    // starting it as soon as the screen is ready to recognise someone it
+    // usually has time to resolve before anyone's actually matched. Bumped
+    // again each captureKey (i.e. after every punch) so the next person
+    // gets a fresh-ish fix rather than reusing an aging one.
+    primeLocation();
   }, [captureKey]);
 
   async function handleCapture({ face }: CaptureResult) {
@@ -57,9 +64,18 @@ export default function PunchPage() {
       return;
     }
 
+    const location = getCachedLocation();
+
     const wageEmployee = wageEmployees.find((e) => e.id === match.id);
     if (wageEmployee) {
-      const punch = await recordPunch({ employeeId: wageEmployee.id, method: "face", matchScore: match.score });
+      const punch = await recordPunch({
+        employeeId: wageEmployee.id,
+        method: "face",
+        matchScore: match.score,
+        latitude: location?.latitude,
+        longitude: location?.longitude,
+        accuracy: location?.accuracy,
+      });
       setOutcome({ kind: "success", origin: "wage", employee: wageEmployee, punch });
       syncSoon();
       return;
@@ -68,6 +84,9 @@ export default function PunchPage() {
     const payrollEmployee = payrollEmployees.find((e) => e.id === match.id)!;
     const punch = await recordPayrollPunch({
       employeeId: payrollEmployee.id,
+      latitude: location?.latitude,
+      longitude: location?.longitude,
+      accuracy: location?.accuracy,
       empCode: payrollEmployee.empCode,
       method: "face",
       matchScore: match.score,

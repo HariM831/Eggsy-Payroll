@@ -195,6 +195,9 @@ interface ServerPunch {
   timestamp: number;
   method: PunchMethod;
   matchScore: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  accuracy: number | null;
 }
 
 interface ServerOverride {
@@ -261,6 +264,9 @@ async function pullAttendanceHistory(serverUrl: string, token: string): Promise<
         matchScore: p.matchScore,
         capturedPhotoDataUrl: null, // never uploaded — see the note above
         note: null,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        accuracy: p.accuracy,
         syncedAt: pulledAt, // came from the server, so already synced by definition
       }),
     ),
@@ -411,6 +417,9 @@ export async function syncNow(): Promise<{
         timestamp: p.timestamp,
         method: p.method,
         matchScore: p.matchScore,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        accuracy: p.accuracy,
       })),
       overrides: overrides.map((o) => ({
         key: o.key,
@@ -563,6 +572,9 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
           timestamp: p.timestamp,
           method: p.method,
           matchScore: p.matchScore,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          accuracy: p.accuracy,
         })),
       };
       const res = await fetch(`${apiBase(config.serverUrl)}/api/attendance-sync/punches`, {

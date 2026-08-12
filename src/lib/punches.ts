@@ -29,6 +29,9 @@ export async function recordPunch(input: {
   method: PunchMethod;
   matchScore?: number | null;
   capturedPhotoDataUrl?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracy?: number | null;
 }): Promise<Punch> {
   const now = new Date();
   const date = localDate(now);
@@ -43,12 +46,16 @@ export async function recordPunch(input: {
     matchScore: input.matchScore ?? null,
     capturedPhotoDataUrl: input.capturedPhotoDataUrl ?? null,
     note: null,
+    latitude: input.latitude ?? null,
+    longitude: input.longitude ?? null,
+    accuracy: input.accuracy ?? null,
   };
   await put("punches", punch);
   return punch;
 }
 
-/** HR correction: insert a manual punch (e.g. backfilling a missed out-punch). */
+/** HR correction: insert a manual punch (e.g. backfilling a missed out-punch).
+ * No location — this is a desk correction after the fact, not a live punch. */
 export async function addManualPunch(input: {
   employeeId: string;
   punchType: "in" | "out";
@@ -65,6 +72,9 @@ export async function addManualPunch(input: {
     matchScore: null,
     capturedPhotoDataUrl: null,
     note: input.note,
+    latitude: null,
+    longitude: null,
+    accuracy: null,
   };
   await put("punches", punch);
   return punch;
@@ -114,6 +124,9 @@ export async function recordPayrollPunch(input: {
   empCode: string;
   method: PunchMethod;
   matchScore?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracy?: number | null;
 }): Promise<PayrollPunch> {
   const now = new Date();
   const date = localDate(now);
@@ -127,6 +140,9 @@ export async function recordPayrollPunch(input: {
     punchDate: date,
     method: input.method,
     matchScore: input.matchScore ?? null,
+    latitude: input.latitude ?? null,
+    longitude: input.longitude ?? null,
+    accuracy: input.accuracy ?? null,
   };
   await put("payrollPunches", punch);
   return punch;
