@@ -3,7 +3,20 @@ import { getAll, put } from './db';
 import type { Employee, Punch } from '../types';
 import type { DayOverride } from './attendance';
 
-const BACKUP_DIRECTORY = Directory.External;
+// ExternalStorage (/storage/emulated/0) — NOT External, which maps to
+// getExternalFilesDir() and is deleted by Android on uninstall along with the
+// app. This directory sits outside the app's own folder, so the backup file
+// genuinely survives an uninstall/reinstall, which is the whole point of it.
+//
+// The trade-off: on Android 11+ writing here needs the "All files access"
+// special permission (MANAGE_EXTERNAL_STORAGE, declared in
+// scripts/patch-android-manifest.mjs). Android deliberately does not let an
+// app request that from a normal permission dialog — it has to be switched on
+// once per device under Settings > Apps > Niko-Payroll > Special app access.
+// Until it is, saveBackup() fails silently (it already swallows errors) and
+// checkBackup() simply reports no backup; nothing else breaks. Settings shows
+// a hint explaining this.
+const BACKUP_DIRECTORY = Directory.ExternalStorage;
 
 // We hash the deviceId to use as the filename, so the raw ID isn't exposed
 async function hashDeviceId(deviceId: string): Promise<string> {

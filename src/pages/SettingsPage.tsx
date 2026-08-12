@@ -331,6 +331,20 @@ export default function SettingsPage() {
               <p>No local backup found for this device.</p>
             )}
           </div>
+
+          {/* The backup is written outside the app's own folder so it survives
+              an uninstall, which Android gates behind a permission it refuses
+              to show an in-app prompt for — so the only way to explain it is
+              here. Shown until a backup actually exists, since a missing one
+              is almost always this. */}
+          {!backupMeta?.exists && (
+            <p className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed">
+              Backups are saved outside the app so they survive uninstalling it. Android
+              needs permission for that, and it can't be asked for from inside the app —
+              turn on <span className="font-medium">All files access</span> once under
+              Settings &gt; Apps &gt; Niko-Payroll &gt; Special app access, then sync.
+            </p>
+          )}
           
           <button
             onClick={handleRestoreBackup}

@@ -27,6 +27,14 @@ const needed = [
   '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
   '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
   '<uses-feature android:name="android.hardware.location.gps" android:required="false" />',
+  // Lets the encrypted backup live outside the app's own folder so it
+  // survives an uninstall (see BACKUP_DIRECTORY in src/lib/backup.ts).
+  // Declaring it is not enough: Android treats this as a "special" permission
+  // that can never be granted from an in-app dialog, so it must be switched on
+  // per device under Settings > Apps > Niko-Payroll > Special app access >
+  // All files access. Without it the backup silently no-ops; nothing else is
+  // affected.
+  '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
 ];
 
 let changed = false;
