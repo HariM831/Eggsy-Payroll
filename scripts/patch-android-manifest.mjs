@@ -27,14 +27,6 @@ const needed = [
   '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
   '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
   '<uses-feature android:name="android.hardware.location.gps" android:required="false" />',
-  // Lets the encrypted backup live outside the app's own folder so it
-  // survives an uninstall (see BACKUP_DIRECTORY in src/lib/backup.ts).
-  // Declaring it is not enough: Android treats this as a "special" permission
-  // that can never be granted from an in-app dialog, so it must be switched on
-  // per device under Settings > Apps > Niko-Payroll > Special app access >
-  // All files access. Without it the backup silently no-ops; nothing else is
-  // affected.
-  '<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
 ];
 
 let changed = false;
@@ -42,6 +34,18 @@ for (const line of needed) {
   const tag = line.match(/android:name="([^"]+)"/)[1];
   if (xml.includes(tag)) continue;
   xml = xml.replace(/<manifest[^>]*>/, (m) => `${m}\n    ${line}`);
+  changed = true;
+}
+
+// The encrypted backup lives in the public Documents directory (see
+// BACKUP_DIRECTORY in src/lib/backup.ts) so it survives an uninstall.
+// On Android 11+ that "just works" for files the app itself created, no
+// permission needed — but Android 10 alone still enforces the pre-scoped-
+// storage rules unless legacy access is explicitly opted into here. This is
+// an <application> attribute, not a <uses-permission>, so it's patched in
+// separately from the list above.
+if (!xml.includes("android:requestLegacyExternalStorage")) {
+  xml = xml.replace(/<application/, '<application\n        android:requestLegacyExternalStorage="true"');
   changed = true;
 }
 

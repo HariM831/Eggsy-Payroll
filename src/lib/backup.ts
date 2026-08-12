@@ -3,20 +3,20 @@ import { getAll, put } from './db';
 import type { Employee, Punch } from '../types';
 import type { DayOverride } from './attendance';
 
-// ExternalStorage (/storage/emulated/0) — NOT External, which maps to
-// getExternalFilesDir() and is deleted by Android on uninstall along with the
-// app. This directory sits outside the app's own folder, so the backup file
-// genuinely survives an uninstall/reinstall, which is the whole point of it.
+// Documents (Environment.getExternalStoragePublicDirectory) — NOT External
+// (getExternalFilesDir, deleted on uninstall) and NOT ExternalStorage, which
+// per the plugin's own docs "is not accessible on Android 11 or newer" at
+// all — confirmed the hard way: stat() reported a backup existed while
+// readFile() on the identical path failed with "File does not exist".
 //
-// The trade-off: on Android 11+ writing here needs the "All files access"
-// special permission (MANAGE_EXTERNAL_STORAGE, declared in
-// scripts/patch-android-manifest.mjs). Android deliberately does not let an
-// app request that from a normal permission dialog — it has to be switched on
-// once per device under Settings > Apps > Niko-Payroll > Special app access.
-// Until it is, saveBackup() fails silently (it already swallows errors) and
-// checkBackup() simply reports no backup; nothing else breaks. Settings shows
-// a hint explaining this.
-const BACKUP_DIRECTORY = Directory.ExternalStorage;
+// Documents sits outside the app's own folder, so it genuinely survives an
+// uninstall, AND — per the same docs — "on Android 11 or newer the app can
+// only access the files/folders the app created", which is exactly this
+// case (this app writes its own backup, then reads it back). No special
+// permission needed on 11+. Android 10 alone needs
+// android:requestLegacyExternalStorage="true" in the manifest (added in
+// scripts/patch-android-manifest.mjs) — that's automatic, no user action.
+const BACKUP_DIRECTORY = Directory.Documents;
 
 // We hash the deviceId to use as the filename, so the raw ID isn't exposed
 async function hashDeviceId(deviceId: string): Promise<string> {

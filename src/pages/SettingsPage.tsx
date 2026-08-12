@@ -19,7 +19,6 @@ import {
 import { checkBackup, restoreFromBackup, type BackupMetadata } from "../lib/backup";
 import { checkLocationNow, getLocationStatus, type LocationStatus } from "../lib/location";
 import { lock } from "../lib/pin";
-import { NativeSettings, AndroidSettings } from "capacitor-native-settings";
 
 function formatWhen(ts: number | null): string {
   if (!ts) return "never";
@@ -373,30 +372,18 @@ export default function SettingsPage() {
             )}
           </div>
 
-          {/* The backup is written outside the app's own folder so it survives
-              an uninstall, which Android gates behind a permission it refuses
-              to show an in-app prompt for — so the only way to explain it is
-              here. Shown until a backup actually exists, since a missing one
-              is almost always this. The button below can only jump to this
-              app's own info screen (ACTION_APPLICATION_DETAILS_SETTINGS) —
-              Android has no intent for the exact toggle, so the last couple
-              of taps are unavoidably manual. */}
+          {/* Written to the public Documents directory so it survives an
+              uninstall — see BACKUP_DIRECTORY in src/lib/backup.ts. No
+              special permission needed on Android 11+ (the OS grants an app
+              access back to files it created itself); Android 10 needs
+              android:requestLegacyExternalStorage, which the manifest patch
+              sets automatically. No user action either way, unlike the
+              MANAGE_EXTERNAL_STORAGE approach this replaced. */}
           {!backupMeta?.exists && (
-            <div className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed space-y-2">
-              <p>
-                Backups are saved outside the app so they survive uninstalling it. Android
-                needs permission for that, and it can't be asked for from inside the app —
-                turn on <span className="font-medium">All files access</span>, then sync.
-              </p>
-              <button
-                onClick={() =>
-                  NativeSettings.openAndroid({ option: AndroidSettings.ApplicationDetails }).catch(() => {})
-                }
-                className="w-full py-2 rounded-lg border border-gray-300 text-gray-700 text-xs font-medium"
-              >
-                Open app settings → Permissions → Files and media → Allow all files
-              </button>
-            </div>
+            <p className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed">
+              No local backup found for this device yet — one is saved automatically after
+              the next successful sync.
+            </p>
           )}
 
           <button
