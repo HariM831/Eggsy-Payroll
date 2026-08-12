@@ -34,23 +34,30 @@ let requesting = false;
 export function primeLocation(): void {
   if (requesting) return;
   requesting = true;
-  Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 })
-    .then((pos) => {
+
+  (async () => {
+    try {
+      const perm = await Geolocation.checkPermissions();
+      if (perm.location !== "granted") {
+        const result = await Geolocation.requestPermissions();
+        if (result.location !== "granted") return;
+      }
+
+      const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 });
       latest = {
         latitude: pos.coords.latitude,
         longitude: pos.coords.longitude,
         accuracy: pos.coords.accuracy,
         at: Date.now(),
       };
-    })
-    .catch(() => {
+    } catch {
       // Permission denied / GPS off / no signal / timed out — leave
       // `latest` as whatever it already was; staleness is handled by
       // getCachedLocation(), not by clearing it here.
-    })
-    .finally(() => {
+    } finally {
       requesting = false;
-    });
+    }
+  })();
 }
 
 /** Whatever fix is currently available and fresh enough, or null. Pure,

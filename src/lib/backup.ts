@@ -3,6 +3,8 @@ import { getAll, put } from './db';
 import type { Employee, Punch } from '../types';
 import type { DayOverride } from './attendance';
 
+const BACKUP_DIRECTORY = Directory.External;
+
 // We hash the deviceId to use as the filename, so the raw ID isn't exposed
 async function hashDeviceId(deviceId: string): Promise<string> {
   const msgBuffer = new TextEncoder().encode(deviceId);
@@ -100,9 +102,9 @@ export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
     const path = await getBackupPath(deviceId);
     const stat = await Filesystem.stat({
       path,
-      directory: Directory.Documents,
+      directory: BACKUP_DIRECTORY,
     });
-    
+    if (stat.size === 0) return { exists: false };
     return { 
       exists: true, 
       savedAt: stat.mtime 
@@ -137,7 +139,7 @@ export async function saveBackup(deviceId: string): Promise<void> {
     try {
       await Filesystem.mkdir({
         path: 'niko-payroll',
-        directory: Directory.Documents,
+        directory: BACKUP_DIRECTORY,
         recursive: true
       });
     } catch (e) {
@@ -147,7 +149,7 @@ export async function saveBackup(deviceId: string): Promise<void> {
     await Filesystem.writeFile({
       path,
       data: fileContent,
-      directory: Directory.Documents,
+      directory: BACKUP_DIRECTORY,
       encoding: Encoding.UTF8,
     });
     console.log(`Encrypted backup saved to ${path}`);
@@ -163,7 +165,7 @@ export async function restoreFromBackup(deviceId: string): Promise<{ employees: 
   const path = await getBackupPath(deviceId);
   const result = await Filesystem.readFile({
     path,
-    directory: Directory.Documents,
+    directory: BACKUP_DIRECTORY,
     encoding: Encoding.UTF8,
   });
 
