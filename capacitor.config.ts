@@ -3,6 +3,7 @@ import type { CapacitorConfig } from "@capacitor/cli";
 const config: CapacitorConfig = {
   appId: "com.aminofarms.nikopayroll",
   appName: "Niko-Payroll",
+  version: "0.1.0",
   webDir: "dist",
   android: {
     allowMixedContent: false,

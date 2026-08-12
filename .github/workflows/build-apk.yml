@@ -72,6 +72,9 @@ jobs:
       - name: Grant camera permission in the generated manifest
         run: node scripts/patch-android-manifest.mjs
 
+      - name: Pin signing to the committed debug keystore
+        run: node scripts/patch-android-signing.mjs
+
       - name: Sync web assets into the Android project
         run: npx cap sync android
 

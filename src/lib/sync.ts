@@ -606,6 +606,7 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
     }
 
     await setPayrollSyncStatus({ lastSuccessAt: now, lastError: null });
+    if (config.deviceId) saveBackup(config.deviceId);
     return { ok: true, synced: punches.length };
   } catch (err: any) {
     const message = err?.message ?? String(err);
@@ -651,9 +652,12 @@ let started = false;
 
 /** Runs both sync scopes together — they share one device token (see module
  * comment above), so both fire once it's configured; before that, both are
- * cheap early-return no-ops. */
+ * cheap early-return no-ops. Saves a single backup after both complete. */
 function syncAllNow(): Promise<unknown> {
-  return Promise.all([syncNow(), syncPayrollNow()]);
+  return Promise.all([syncNow(), syncPayrollNow()]).then(async () => {
+    const config = await getDeviceConfig();
+    if (config?.deviceId) saveBackup(config.deviceId);
+  });
 }
 
 function scheduleNext() {

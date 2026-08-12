@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build && node scripts/copy-face-models.mjs",
     "preview": "vite preview",
     "postinstall": "node scripts/copy-face-models.mjs",
-    "cap:add:android": "cap add android",
+    "cap:add:android": "cap add android && node scripts/patch-android-manifest.mjs && node scripts/patch-android-signing.mjs && cap sync android",
     "cap:sync": "cap sync android",
     "cap:open:android": "cap open android"
   },

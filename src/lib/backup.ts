@@ -1,24 +1,10 @@
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { getAll, put } from './db';
-import type { Employee, Punch } from '../types';
+import type { Employee, Punch, PayrollEmployee, PayrollPunch } from '../types';
 import type { DayOverride } from './attendance';
 
-// Documents (Environment.getExternalStoragePublicDirectory) — NOT External
-// (getExternalFilesDir, deleted on uninstall) and NOT ExternalStorage, which
-// per the plugin's own docs "is not accessible on Android 11 or newer" at
-// all — confirmed the hard way: stat() reported a backup existed while
-// readFile() on the identical path failed with "File does not exist".
-//
-// Documents sits outside the app's own folder, so it genuinely survives an
-// uninstall, AND — per the same docs — "on Android 11 or newer the app can
-// only access the files/folders the app created", which is exactly this
-// case (this app writes its own backup, then reads it back). No special
-// permission needed on 11+. Android 10 alone needs
-// android:requestLegacyExternalStorage="true" in the manifest (added in
-// scripts/patch-android-manifest.mjs) — that's automatic, no user action.
 const BACKUP_DIRECTORY = Directory.Documents;
 
-// We hash the deviceId to use as the filename, so the raw ID isn't exposed
 async function hashDeviceId(deviceId: string): Promise<string> {
   const msgBuffer = new TextEncoder().encode(deviceId);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
@@ -56,11 +42,11 @@ async function deriveKey(deviceId: string): Promise<CryptoKey> {
     false,
     ["deriveKey"]
   );
-  
+
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: enc.encode("niko-payroll-backup-salt-v1"), // static salt is fine here, key is deterministic per device
+      salt: enc.encode("niko-payroll-backup-salt-v1"),
       iterations: 100000,
       hash: "SHA-256",
     },
@@ -71,17 +57,17 @@ async function deriveKey(deviceId: string): Promise<CryptoKey> {
   );
 }
 
-async function encryptData(deviceId: string, data: string): Promise<{ iv: string, cipher: string }> {
+async function encryptData(deviceId: string, data: string): Promise<{ iv: string; cipher: string }> {
   const key = await deriveKey(deviceId);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encoded = new TextEncoder().encode(data);
-  
+
   const cipherBuffer = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     key,
     encoded
   );
-  
+
   return {
     iv: buf2hex(iv.buffer),
     cipher: buf2hex(cipherBuffer)
@@ -92,13 +78,13 @@ async function decryptData(deviceId: string, ivHex: string, cipherHex: string): 
   const key = await deriveKey(deviceId);
   const iv = hex2buf(ivHex);
   const cipherBuffer = hex2buf(cipherHex);
-  
+
   const decryptedBuffer = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: new Uint8Array(iv) },
     key,
     cipherBuffer
   );
-  
+
   return new TextDecoder().decode(decryptedBuffer);
 }
 
@@ -107,6 +93,13 @@ async function decryptData(deviceId: string, ivHex: string, cipherHex: string): 
 export interface BackupMetadata {
   exists: boolean;
   savedAt?: number;
+  /** numbers from the backup file itself (only set after reading it) */
+  employees?: number;
+  punches?: number;
+  overrides?: number;
+  payrollEmployees?: number;
+  payrollPunches?: number;
+  metaKeys?: number;
 }
 
 export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
@@ -118,10 +111,31 @@ export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
       directory: BACKUP_DIRECTORY,
     });
     if (stat.size === 0) return { exists: false };
-    return { 
-      exists: true, 
-      savedAt: stat.mtime 
-    };
+
+    const meta: BackupMetadata = { exists: true, savedAt: stat.mtime };
+
+    try {
+      const result = await Filesystem.readFile({
+        path,
+        directory: BACKUP_DIRECTORY,
+        encoding: Encoding.UTF8,
+      });
+      const fileData = JSON.parse(result.data as string);
+      if (fileData.iv && fileData.cipher) {
+        const decryptedStr = await decryptData(deviceId, fileData.iv, fileData.cipher);
+        const data = JSON.parse(decryptedStr);
+        meta.employees = Array.isArray(data.employees) ? data.employees.length : 0;
+        meta.punches = Array.isArray(data.punches) ? data.punches.length : 0;
+        meta.overrides = Array.isArray(data.overrides) ? data.overrides.length : 0;
+        meta.payrollEmployees = Array.isArray(data.payrollEmployees) ? data.payrollEmployees.length : 0;
+        meta.payrollPunches = Array.isArray(data.payrollPunches) ? data.payrollPunches.length : 0;
+        meta.metaKeys = Array.isArray(data.metaEntries) ? data.metaEntries.length : 0;
+      }
+    } catch {
+      // can't read/decode — file might be corrupted or from a different device, still report exists
+    }
+
+    return meta;
   } catch (e) {
     return { exists: false };
   }
@@ -130,25 +144,31 @@ export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
 export async function saveBackup(deviceId: string): Promise<void> {
   if (!deviceId) return;
   try {
-    const [employees, punches, overrides] = await Promise.all([
+    const [employees, punches, overrides, payrollEmployees, payrollPunches, metaEntries] = await Promise.all([
       getAll<Employee>('employees'),
       getAll<Punch>('punches'),
       getAll<DayOverride>('overrides'),
+      getAll<PayrollEmployee>('payrollEmployees'),
+      getAll<PayrollPunch>('payrollPunches'),
+      getAll<any>('meta'),
     ]);
 
     const rawData = JSON.stringify({
+      formatVersion: "0.2.0",
       savedAt: Date.now(),
-      appVersion: "0.1.0",
       employees,
       punches,
       overrides,
+      payrollEmployees,
+      payrollPunches,
+      metaEntries,
     });
 
     const encrypted = await encryptData(deviceId, rawData);
-    const fileContent = JSON.stringify(encrypted); // { iv: "...", cipher: "..." }
+    const fileContent = JSON.stringify(encrypted);
 
     const path = await getBackupPath(deviceId);
-    
+
     try {
       await Filesystem.mkdir({
         path: 'niko-payroll',
@@ -168,13 +188,21 @@ export async function saveBackup(deviceId: string): Promise<void> {
     console.log(`Encrypted backup saved to ${path}`);
   } catch (e) {
     console.error("Failed to save encrypted backup:", e);
-    // best-effort, swallow
   }
 }
 
-export async function restoreFromBackup(deviceId: string): Promise<{ employees: number; punches: number; overrides: number }> {
+export interface RestoreResult {
+  employees: number;
+  punches: number;
+  overrides: number;
+  payrollEmployees: number;
+  payrollPunches: number;
+  metaKeys: number;
+}
+
+export async function restoreFromBackup(deviceId: string): Promise<RestoreResult> {
   if (!deviceId) throw new Error("No device ID provided");
-  
+
   const path = await getBackupPath(deviceId);
   const result = await Filesystem.readFile({
     path,
@@ -194,38 +222,61 @@ export async function restoreFromBackup(deviceId: string): Promise<{ employees: 
   } catch (e) {
     throw new Error("Failed to decrypt backup. The file may be corrupt or belongs to a different device.");
   }
-  
+
   const backupEmployees: Employee[] = data.employees || [];
   const backupPunches: Punch[] = data.punches || [];
   const backupOverrides: DayOverride[] = data.overrides || [];
+  const backupPayrollEmployees: PayrollEmployee[] = data.payrollEmployees || [];
+  const backupPayrollPunches: PayrollPunch[] = data.payrollPunches || [];
+  const backupMetaEntries: Record<string, any>[] = data.metaEntries || [];
+
+  // Merge helpers: only overwrite local if it doesn't exist unsynced locally
+  function mergeList<T extends { id?: string; key?: string; syncedAt?: number }>(
+    localById: Map<string, T>,
+    backup: T[],
+    idFn: (item: T) => string,
+  ): T[] {
+    return backup.filter(b => {
+      const local = localById.get(idFn(b));
+      return !local || local.syncedAt;
+    });
+  }
 
   const localEmployees = new Map((await getAll<Employee>('employees')).map(e => [e.id, e]));
-  const toWriteEmployees = backupEmployees.filter(b => {
-    const local = localEmployees.get(b.id);
-    return !local || local.syncedAt;
-  });
-
   const localPunches = new Map((await getAll<Punch>('punches')).map(p => [p.id, p]));
-  const toWritePunches = backupPunches.filter(b => {
-    const local = localPunches.get(b.id);
-    return !local || local.syncedAt;
-  });
-
   const localOverrides = new Map((await getAll<DayOverride>('overrides')).map(o => [o.key, o]));
-  const toWriteOverrides = backupOverrides.filter(b => {
-    const local = localOverrides.get(b.key);
-    return !local || local.syncedAt;
-  });
+  const localPayrollEmployees = new Map((await getAll<PayrollEmployee>('payrollEmployees')).map(e => [e.id, e]));
+  const localPayrollPunches = new Map((await getAll<PayrollPunch>('payrollPunches')).map(p => [p.id, p]));
+
+  const toWriteEmployees = mergeList(localEmployees, backupEmployees, e => e.id);
+  const toWritePunches = mergeList(localPunches, backupPunches, p => p.id);
+  const toWriteOverrides = mergeList(localOverrides, backupOverrides, o => o.key);
+  const toWritePayrollEmployees = mergeList(localPayrollEmployees, backupPayrollEmployees, e => e.id);
+  const toWritePayrollPunches = mergeList(localPayrollPunches, backupPayrollPunches, p => p.id);
+
+  let restoredMeta = 0;
+  const metaOps: Promise<void>[] = [];
+  for (const entry of backupMetaEntries) {
+    if (!entry.key) continue;
+    metaOps.push(put('meta', entry));
+    restoredMeta++;
+  }
 
   await Promise.all([
     ...toWriteEmployees.map(e => put('employees', e)),
     ...toWritePunches.map(p => put('punches', p)),
     ...toWriteOverrides.map(o => put('overrides', o)),
+    ...toWritePayrollEmployees.map(e => put('payrollEmployees', e)),
+    ...toWritePayrollPunches.map(p => put('payrollPunches', p)),
+    ...metaOps,
   ]);
 
   return {
     employees: toWriteEmployees.length,
     punches: toWritePunches.length,
-    overrides: toWriteOverrides.length
+    overrides: toWriteOverrides.length,
+    payrollEmployees: toWritePayrollEmployees.length,
+    payrollPunches: toWritePayrollPunches.length,
+    metaKeys: restoredMeta,
   };
 }

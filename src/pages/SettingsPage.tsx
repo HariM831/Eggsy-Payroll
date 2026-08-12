@@ -16,7 +16,7 @@ import {
   type SyncStatus,
   type PayrollSyncStatus,
 } from "../lib/sync";
-import { checkBackup, restoreFromBackup, type BackupMetadata } from "../lib/backup";
+import { checkBackup, restoreFromBackup, saveBackup, type BackupMetadata, type RestoreResult } from "../lib/backup";
 import { checkLocationNow, getLocationStatus, type LocationStatus } from "../lib/location";
 import { lock } from "../lib/pin";
 
@@ -158,6 +158,9 @@ export default function SettingsPage() {
       setToken("");
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+
+      // Auto-backup whatever we have so far (full backup happens after next sync)
+      saveBackup(devInfo.deviceId);
       refresh();
     } catch (err: any) {
       setVerifyResult({ ok: false, message: `Verification failed: ${err.message}` });
@@ -191,6 +194,11 @@ export default function SettingsPage() {
       const err = resWages.error || resPayroll.error || "Sync failed";
       setVerifyResult({ ok: false, message: `Sync failed: ${err}` });
     }
+    // Backup is refreshed after sync (syncNow already saves it internally;
+    // but we also call it here so payroll data is captured too in case
+    // syncPayrollNow ran after syncNow's internal saveBackup).
+    const config = await getDeviceConfig();
+    if (config?.deviceId) saveBackup(config.deviceId);
     refresh();
   }
 
@@ -229,10 +237,18 @@ export default function SettingsPage() {
     
     setRestoringBackup(true);
     try {
-      const res = await restoreFromBackup(config.deviceId);
+      const res: RestoreResult = await restoreFromBackup(config.deviceId);
+      const parts = [
+        res.employees > 0 ? `${res.employees} workers` : null,
+        res.punches > 0 ? `${res.punches} wage punches` : null,
+        res.overrides > 0 ? `${res.overrides} corrections` : null,
+        res.payrollEmployees > 0 ? `${res.payrollEmployees} payroll employees` : null,
+        res.payrollPunches > 0 ? `${res.payrollPunches} payroll punches` : null,
+        res.metaKeys > 0 ? `${res.metaKeys} settings` : null,
+      ].filter(Boolean);
       setRestoreResult({ 
         ok: true, 
-        message: `Restored ${res.employees} workers, ${res.punches} punches, and ${res.overrides} corrections from local backup.` 
+        message: `Restored${parts.length > 0 ? ": " + parts.join(", ") : " — nothing to restore"}.` 
       });
       refresh();
     } catch (err: any) {
@@ -361,36 +377,36 @@ export default function SettingsPage() {
         <section className="space-y-3 border-t pt-4">
           <h2 className="text-sm font-medium text-gray-700">Local Backup</h2>
           
-          <div className="text-sm text-gray-600">
+          <div className="text-sm text-gray-600 space-y-1">
             {backupMeta?.exists ? (
               <>
-                <p className="text-green-600 font-medium">✓ Backup found for this token</p>
+                <p className="text-green-600 font-medium">Backup found for this device</p>
                 {backupMeta.savedAt && <p>Saved: {formatWhen(backupMeta.savedAt)}</p>}
+                {backupMeta.employees !== undefined && (
+                  <p className="text-xs text-gray-500">
+                    Contents: {backupMeta.employees} workers, {backupMeta.punches} wage punches,{" "}
+                    {backupMeta.payrollEmployees ?? 0} payroll employees, {backupMeta.payrollPunches ?? 0} payroll punches,{" "}
+                    {backupMeta.metaKeys ?? 0} settings
+                  </p>
+                )}
               </>
             ) : (
-              <p>No local backup found for this device.</p>
+              <p className="text-gray-400">
+                No backup yet — one is saved automatically after verifying your token and syncing.
+              </p>
             )}
           </div>
 
-          {/* Written to the public Documents directory so it survives an
-              uninstall — see BACKUP_DIRECTORY in src/lib/backup.ts. No
-              special permission needed on Android 11+ (the OS grants an app
-              access back to files it created itself); Android 10 needs
-              android:requestLegacyExternalStorage, which the manifest patch
-              sets automatically. No user action either way, unlike the
-              MANAGE_EXTERNAL_STORAGE approach this replaced. */}
-          {!backupMeta?.exists && (
-            <p className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed">
-              No local backup found for this device yet — one is saved automatically after
-              the next successful sync.
-            </p>
-          )}
+          <p className="text-xs text-gray-500 bg-gray-50 border rounded-lg p-2.5 leading-relaxed">
+            Backup is saved automatically to the phone's Documents folder — it survives uninstall.
+            Your data is encrypted so only this device can read it.
+          </p>
 
           <button
             onClick={handleRestoreBackup}
             disabled={!backupMeta?.exists || counts.employees > 0 || restoringBackup}
             className="w-full py-2.5 rounded-lg border border-brand text-brand text-sm font-medium disabled:opacity-50"
-            title={counts.employees > 0 ? "Cannot restore when app already has workers" : undefined}
+            title={counts.employees > 0 ? "Restore works best on a fresh install (no existing workers)" : undefined}
           >
             {restoringBackup ? "Restoring…" : "Restore from Backup"}
           </button>
@@ -403,7 +419,6 @@ export default function SettingsPage() {
                   : "bg-red-50 border-red-200 text-red-800"
               }`}
             >
-              {restoreResult.ok ? "✓ " : "✕ "}
               {restoreResult.message}
             </div>
           )}
