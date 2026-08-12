@@ -88,12 +88,69 @@ async function decryptData(deviceId: string, ivHex: string, cipherHex: string): 
   return new TextDecoder().decode(decryptedBuffer);
 }
 
+// ── File I/O with fallback paths ────────────────────────────────────────────
+
+interface ReadResult {
+  data: string;
+}
+
+async function tryReadBackupFile(deviceId: string): Promise<ReadResult> {
+  const path = await getBackupPath(deviceId);
+
+  // Primary: Directory.Documents
+  try {
+    const result = await Filesystem.readFile({
+      path,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8,
+    });
+    return { data: result.data as string };
+  } catch {
+    // fall through to fallback
+  }
+
+  // Fallback: Directory.ExternalStorage with Documents/ prefix.
+  // On some Android versions (especially after a signing-key change),
+  // Directory.Documents blocks readFile() even when stat() succeeds.
+  // ExternalStorage with the full subpath bypasses that scoped-storage quirk.
+  try {
+    const result = await Filesystem.readFile({
+      path: `Documents/${path}`,
+      directory: Directory.ExternalStorage,
+      encoding: Encoding.UTF8,
+    });
+    return { data: result.data as string };
+  } catch {
+    throw new Error("File does not exist");
+  }
+}
+
+async function fileExists(deviceId: string): Promise<{ exists: boolean; mtime?: number }> {
+  const path = await getBackupPath(deviceId);
+  try {
+    const stat = await Filesystem.stat({ path, directory: Directory.Documents });
+    if (stat.size > 0) return { exists: true, mtime: stat.mtime };
+  } catch {
+    // stat failed — try ExternalStorage path
+  }
+  try {
+    const stat = await Filesystem.stat({
+      path: `Documents/${path}`,
+      directory: Directory.ExternalStorage,
+    });
+    if (stat.size > 0) return { exists: true, mtime: stat.mtime };
+  } catch {
+    // neither location has it
+  }
+  return { exists: false };
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 export interface BackupMetadata {
   exists: boolean;
+  readable: boolean;
   savedAt?: number;
-  /** numbers from the backup file itself (only set after reading it) */
   employees?: number;
   punches?: number;
   overrides?: number;
@@ -103,42 +160,32 @@ export interface BackupMetadata {
 }
 
 export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
-  if (!deviceId) return { exists: false };
+  if (!deviceId) return { exists: false, readable: false };
+
+  const f = await fileExists(deviceId);
+  if (!f.exists) return { exists: false, readable: false };
+
+  const meta: BackupMetadata = { exists: true, readable: false, savedAt: f.mtime };
+
   try {
-    const path = await getBackupPath(deviceId);
-    const stat = await Filesystem.stat({
-      path,
-      directory: BACKUP_DIRECTORY,
-    });
-    if (stat.size === 0) return { exists: false };
-
-    const meta: BackupMetadata = { exists: true, savedAt: stat.mtime };
-
-    try {
-      const result = await Filesystem.readFile({
-        path,
-        directory: BACKUP_DIRECTORY,
-        encoding: Encoding.UTF8,
-      });
-      const fileData = JSON.parse(result.data as string);
-      if (fileData.iv && fileData.cipher) {
-        const decryptedStr = await decryptData(deviceId, fileData.iv, fileData.cipher);
-        const data = JSON.parse(decryptedStr);
-        meta.employees = Array.isArray(data.employees) ? data.employees.length : 0;
-        meta.punches = Array.isArray(data.punches) ? data.punches.length : 0;
-        meta.overrides = Array.isArray(data.overrides) ? data.overrides.length : 0;
-        meta.payrollEmployees = Array.isArray(data.payrollEmployees) ? data.payrollEmployees.length : 0;
-        meta.payrollPunches = Array.isArray(data.payrollPunches) ? data.payrollPunches.length : 0;
-        meta.metaKeys = Array.isArray(data.metaEntries) ? data.metaEntries.length : 0;
-      }
-    } catch {
-      // can't read/decode — file might be corrupted or from a different device, still report exists
+    const result = await tryReadBackupFile(deviceId);
+    const fileData = JSON.parse(result.data);
+    if (fileData.iv && fileData.cipher) {
+      const decryptedStr = await decryptData(deviceId, fileData.iv, fileData.cipher);
+      const data = JSON.parse(decryptedStr);
+      meta.readable = true;
+      meta.employees = Array.isArray(data.employees) ? data.employees.length : 0;
+      meta.punches = Array.isArray(data.punches) ? data.punches.length : 0;
+      meta.overrides = Array.isArray(data.overrides) ? data.overrides.length : 0;
+      meta.payrollEmployees = Array.isArray(data.payrollEmployees) ? data.payrollEmployees.length : 0;
+      meta.payrollPunches = Array.isArray(data.payrollPunches) ? data.payrollPunches.length : 0;
+      meta.metaKeys = Array.isArray(data.metaEntries) ? data.metaEntries.length : 0;
     }
-
-    return meta;
-  } catch (e) {
-    return { exists: false };
+  } catch {
+    // can't read/decode — exists on disk but inaccessible
   }
+
+  return meta;
 }
 
 export async function saveBackup(deviceId: string): Promise<void> {
@@ -203,14 +250,9 @@ export interface RestoreResult {
 export async function restoreFromBackup(deviceId: string): Promise<RestoreResult> {
   if (!deviceId) throw new Error("No device ID provided");
 
-  const path = await getBackupPath(deviceId);
-  const result = await Filesystem.readFile({
-    path,
-    directory: BACKUP_DIRECTORY,
-    encoding: Encoding.UTF8,
-  });
+  const result = await tryReadBackupFile(deviceId);
 
-  const fileData = JSON.parse(result.data as string);
+  const fileData = JSON.parse(result.data);
   if (!fileData.iv || !fileData.cipher) {
     throw new Error("Invalid encrypted backup format");
   }
@@ -230,7 +272,6 @@ export async function restoreFromBackup(deviceId: string): Promise<RestoreResult
   const backupPayrollPunches: PayrollPunch[] = data.payrollPunches || [];
   const backupMetaEntries: Record<string, any>[] = data.metaEntries || [];
 
-  // Merge helpers: only overwrite local if it doesn't exist unsynced locally
   function mergeList<T extends { id?: string; key?: string; syncedAt?: number }>(
     localById: Map<string, T>,
     backup: T[],

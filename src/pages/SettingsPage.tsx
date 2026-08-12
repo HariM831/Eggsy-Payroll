@@ -379,17 +379,28 @@ export default function SettingsPage() {
           
           <div className="text-sm text-gray-600 space-y-1">
             {backupMeta?.exists ? (
-              <>
-                <p className="text-green-600 font-medium">Backup found for this device</p>
-                {backupMeta.savedAt && <p>Saved: {formatWhen(backupMeta.savedAt)}</p>}
-                {backupMeta.employees !== undefined && (
-                  <p className="text-xs text-gray-500">
-                    Contents: {backupMeta.employees} workers, {backupMeta.punches} wage punches,{" "}
-                    {backupMeta.payrollEmployees ?? 0} payroll employees, {backupMeta.payrollPunches ?? 0} payroll punches,{" "}
-                    {backupMeta.metaKeys ?? 0} settings
+              backupMeta.readable ? (
+                <>
+                  <p className="text-green-600 font-medium">Backup found for this device</p>
+                  {backupMeta.savedAt && <p>Saved: {formatWhen(backupMeta.savedAt)}</p>}
+                  {backupMeta.employees !== undefined && (
+                    <p className="text-xs text-gray-500">
+                      Contents: {backupMeta.employees} workers, {backupMeta.punches} wage punches,{" "}
+                      {backupMeta.payrollEmployees ?? 0} payroll employees, {backupMeta.payrollPunches ?? 0} payroll punches,{" "}
+                      {backupMeta.metaKeys ?? 0} settings
+                    </p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <p className="text-amber-600 font-medium">Backup file found but inaccessible</p>
+                  {backupMeta.savedAt && <p>Saved: {formatWhen(backupMeta.savedAt)}</p>}
+                  <p className="text-xs text-amber-600">
+                    This happens when the app was reinstalled with a different signing key.
+                    Use Save & Sync to restore your data from the server instead.
                   </p>
-                )}
-              </>
+                </>
+              )
             ) : (
               <p className="text-gray-400">
                 No backup yet — one is saved automatically after verifying your token and syncing.
@@ -404,9 +415,15 @@ export default function SettingsPage() {
 
           <button
             onClick={handleRestoreBackup}
-            disabled={!backupMeta?.exists || counts.employees > 0 || restoringBackup}
+            disabled={!backupMeta?.readable || counts.employees > 0 || restoringBackup}
             className="w-full py-2.5 rounded-lg border border-brand text-brand text-sm font-medium disabled:opacity-50"
-            title={counts.employees > 0 ? "Restore works best on a fresh install (no existing workers)" : undefined}
+            title={
+              !backupMeta?.readable
+                ? "Backup is inaccessible due to signing key change — sync from server instead"
+                : counts.employees > 0
+                  ? "Restore works best on a fresh install (no existing workers)"
+                  : undefined
+            }
           >
             {restoringBackup ? "Restoring…" : "Restore from Backup"}
           </button>
