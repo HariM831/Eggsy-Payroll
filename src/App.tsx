@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import LockScreen from "./components/LockScreen";
 import BottomNav, { type View } from "./components/BottomNav";
 import PunchPage from "./pages/PunchPage";
@@ -7,6 +7,7 @@ import EmployeeFormPage from "./pages/EmployeeFormPage";
 import CalendarPage from "./pages/CalendarPage";
 import SettingsPage from "./pages/SettingsPage";
 import { isUnlocked } from "./lib/pin";
+import { startWatchingLocation } from "./lib/location";
 
 type Screen = View | "employee-form";
 
@@ -19,6 +20,13 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("punch");
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
+
+  // Warm GPS for the whole app session, starting the moment the app opens —
+  // not just when the Punch screen mounts — so a fix is already cached by
+  // the time someone actually punches (see src/lib/location.ts).
+  useEffect(() => {
+    startWatchingLocation();
+  }, []);
 
   function requestScreen(target: Screen) {
     if (PROTECTED.includes(target) && !isUnlocked()) {

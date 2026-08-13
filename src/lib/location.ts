@@ -25,6 +25,7 @@ const MAX_AGE_MS = 5 * 60_000;
 
 let latest: CachedFix | null = null;
 let requesting = false;
+let watchId: string | null = null;
 
 export interface LocationStatus {
   ok: boolean;
@@ -59,7 +60,7 @@ async function attemptFix(): Promise<void> {
       }
     }
 
-    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000 });
+    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 20000 });
     latest = {
       latitude: pos.coords.latitude,
       longitude: pos.coords.longitude,
@@ -76,11 +77,47 @@ async function attemptFix(): Promise<void> {
   }
 }
 
-/** Kicks off a location fix in the background. Call once per punch-screen
- * visit (and again after each punch, so the next person gets a fresh-ish
- * fix) — never awaited, never throws; a punch must never be blocked or
- * broken by location trouble. The outcome still lands in getLocationStatus()
- * for Settings to show, even though nothing here waits on it. */
+/** Starts a standing GPS watch for the life of the app (call once, from
+ * App's top level) so a fix is already warm by the time anyone reaches the
+ * Punch screen — a face can be recognised and a punch recorded in a couple
+ * of seconds, well inside the time a one-shot fix used to need per punch.
+ * Every update refreshes `latest`, so getCachedLocation() stays current for
+ * the whole session instead of racing a fresh fix on every single punch. */
+export function startWatchingLocation(): void {
+  if (watchId) return;
+  Geolocation.checkPermissions()
+    .then((perm) => (perm.location === "granted" ? perm : Geolocation.requestPermissions()))
+    .then((perm) => {
+      if (perm.location !== "granted") {
+        lastStatus = { ok: false, message: "Location permission denied", at: Date.now() };
+        return;
+      }
+      Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000 }, (pos, err) => {
+        if (err) {
+          lastStatus = { ok: false, message: err.message ?? String(err), at: Date.now() };
+          return;
+        }
+        if (!pos) return;
+        latest = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          at: Date.now(),
+        };
+        lastStatus = { ok: true, message: `Accurate to ${Math.round(pos.coords.accuracy)}m`, at: Date.now() };
+      }).then((id) => { watchId = id; });
+    })
+    .catch((err) => {
+      lastStatus = { ok: false, message: err?.message ?? String(err), at: Date.now() };
+    });
+}
+
+/** Kicks off a one-off location fix in the background — used as a fallback
+ * on the Punch screen in case the standing watch (startWatchingLocation)
+ * hasn't produced a fix yet. Never awaited, never throws; a punch must
+ * never be blocked or broken by location trouble. The outcome still lands
+ * in getLocationStatus() for Settings to show, even though nothing here
+ * waits on it. */
 export function primeLocation(): void {
   if (requesting) return;
   requesting = true;
