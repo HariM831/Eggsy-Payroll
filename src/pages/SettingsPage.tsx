@@ -264,7 +264,7 @@ export default function SettingsPage() {
 
       <div className="max-w-sm space-y-6">
         <section className="space-y-3">
-          <h2 className="text-sm font-medium text-gray-700">Sync to Amino Farms</h2>
+          <h2 className="text-sm font-medium text-gray-700">Device & connection</h2>
           <p className="text-xs text-gray-400">
             One token covers both Wages workers and payroll employees — it's the same
             physical device either way. Create/revoke it from Payroll &gt; Wages &gt; Devices.
@@ -349,7 +349,7 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-3 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Location</h2>
+          <h2 className="text-sm font-medium text-gray-700">Diagnostics</h2>
           <p className="text-xs text-gray-400">
             Punches carry GPS the same way the browser kiosk does. If this shows an error,
             that's exactly why recent punches from this device have no location attached.
@@ -375,7 +375,7 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-3 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Local Backup</h2>
+          <h2 className="text-sm font-medium text-gray-700">Backup & recovery</h2>
           
           <div className="text-sm text-gray-600 space-y-1">
             {backupMeta?.exists ? (
@@ -442,7 +442,7 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-2 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Wages sync status</h2>
+          <h2 className="text-sm font-medium text-gray-700">Sync — Wages</h2>
           <div className="text-sm text-gray-600 space-y-1">
             <p>Last attempt: {formatWhen(status?.lastAttemptAt ?? null)}</p>
             <p>Last success: {formatWhen(status?.lastSuccessAt ?? null)}</p>
@@ -464,7 +464,7 @@ export default function SettingsPage() {
         </section>
 
         <section className="space-y-2 border-t pt-4">
-          <h2 className="text-sm font-medium text-gray-700">Payroll sync status</h2>
+          <h2 className="text-sm font-medium text-gray-700">Sync — Payroll</h2>
           <div className="text-sm text-gray-600 space-y-1">
             <p>Last attempt: {formatWhen(payrollStatus?.lastAttemptAt ?? null)}</p>
             <p>Last success: {formatWhen(payrollStatus?.lastSuccessAt ?? null)}</p>

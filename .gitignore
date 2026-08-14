@@ -5,5 +5,6 @@ android/
 *.log
 public/models/
 .claude/
+.reasonix/
 *.tsbuildinfo
 

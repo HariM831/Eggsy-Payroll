@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { listEmployees } from "../lib/employees";
 import { resolveMonth, setDayOverride, resolveDay } from "../lib/attendance";
 import { syncSoon } from "../lib/sync";
-import type { Employee, DayResolution } from "../types";
+import { getAll } from "../lib/db";
+import type { Employee, DayResolution, Punch } from "../types";
+import type { DayOverride } from "../lib/attendance";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -16,6 +18,7 @@ export default function CalendarPage() {
   const [days, setDays] = useState<Record<string, DayResolution>>({});
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [unsyncedDates, setUnsyncedDates] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     listEmployees().then(setEmployees);
@@ -24,7 +27,17 @@ export default function CalendarPage() {
   async function refresh() {
     if (!employeeId) return;
     setLoading(true);
-    setDays(await resolveMonth(employeeId, month, year));
+    const monthPrefix = `${year}-${String(month).padStart(2, "0")}-`;
+    const [resolvedDays, punches, overrides] = await Promise.all([
+      resolveMonth(employeeId, month, year),
+      getAll<Punch>("punches"),
+      getAll<DayOverride>("overrides"),
+    ]);
+    setDays(resolvedDays);
+    setUnsyncedDates(new Set([
+      ...punches.filter((p) => p.employeeId === employeeId && p.punchDate.startsWith(monthPrefix) && !p.syncedAt).map((p) => p.punchDate),
+      ...overrides.filter((o) => o.employeeId === employeeId && o.date.startsWith(monthPrefix) && o.status && !o.syncedAt).map((o) => o.date),
+    ]));
     setLoading(false);
   }
 
@@ -91,21 +104,24 @@ export default function CalendarPage() {
                 {Array.from({ length: firstWeekday }).map((_, i) => <div key={`pad-${i}`} />)}
                 {Array.from({ length: daysInMonth }, (_, i) => String(i + 1)).map((d) => {
                   const info = days[d];
+                  const date = dateStr(d);
+                  const hasException = !!info && (info.openIn || info.manual || unsyncedDates.has(date));
                   return (
                     <button
                       key={d}
                       disabled={!info}
                       onClick={() => setSelectedDay(d)}
-                      className={`aspect-square rounded-md text-xs flex flex-col items-center justify-center ${
+                      className={`relative aspect-square rounded-md text-xs flex flex-col items-center justify-center ${
                         !info
                           ? "bg-gray-50 text-gray-300"
                           : info.status === "P"
                           ? "bg-green-100 text-green-800"
                           : "bg-red-100 text-red-700"
-                      }`}
+                      } ${hasException ? "ring-2 ring-amber-400 ring-inset" : ""}`}
                     >
                       <span className="opacity-70">{d}</span>
                       <span className="font-semibold">{info?.status ?? "–"}</span>
+                      {hasException && <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />}
                     </button>
                   );
                 })}
@@ -113,6 +129,7 @@ export default function CalendarPage() {
               <div className="flex gap-4 mt-3 text-xs text-gray-500">
                 <span><span className="inline-block w-2.5 h-2.5 rounded-sm bg-green-200 mr-1" />Present</span>
                 <span><span className="inline-block w-2.5 h-2.5 rounded-sm bg-red-200 mr-1" />Absent</span>
+                <span><span className="inline-block w-2.5 h-2.5 rounded-sm ring-2 ring-amber-400 mr-1" />Needs attention</span>
               </div>
             </>
           )}
@@ -129,12 +146,15 @@ export default function CalendarPage() {
               </span>
               {selectedInfo.manual && <span className="text-gray-400"> (manually set)</span>}
             </p>
+            {unsyncedDates.has(dateStr(selectedDay)) && <p className="text-sm text-amber-700">Waiting to sync to Amino Farms</p>}
             {selectedInfo.firstIn && (
               <p className="text-sm text-gray-500">
                 In {new Date(selectedInfo.firstIn).toLocaleTimeString()}
                 {selectedInfo.lastOut ? ` · Out ${new Date(selectedInfo.lastOut).toLocaleTimeString()}` : selectedInfo.openIn ? " · not punched out" : ""}
               </p>
             )}
+            {selectedInfo.openIn && <p className="text-sm text-amber-700 mt-1">Missing OUT punch — correct the day below if needed.</p>}
+            <p className="text-xs text-gray-500 mt-3">Correct attendance</p>
             <div className="flex gap-2 mt-3">
               <button onClick={() => override("P")} className="flex-1 py-2 rounded-lg border border-green-600 text-green-700 text-sm">
                 Mark Present

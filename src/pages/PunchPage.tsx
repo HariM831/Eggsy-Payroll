@@ -59,6 +59,7 @@ export default function PunchPage() {
   const [wagePresent, setWagePresent] = useState(0);
   const [payrollPresent, setPayrollPresent] = useState(0);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
     listEmployees().then(setWageEmployees);
@@ -66,6 +67,24 @@ export default function PunchPage() {
     primeLocation();
     loadStats();
   }, [captureKey]);
+
+  useEffect(() => {
+    const updateConnection = () => setIsOnline(navigator.onLine);
+    window.addEventListener("online", updateConnection);
+    window.addEventListener("offline", updateConnection);
+    return () => {
+      window.removeEventListener("online", updateConnection);
+      window.removeEventListener("offline", updateConnection);
+    };
+  }, []);
+
+  // Keep the gate moving: successful punches return to the camera on their
+  // own, while the visible Next button remains available for immediate use.
+  useEffect(() => {
+    if (!outcome || outcome.kind !== "success") return;
+    const timer = window.setTimeout(reset, 4_000);
+    return () => window.clearTimeout(timer);
+  }, [outcome]);
 
   async function loadStats() {
     const today = localDate();
@@ -235,7 +254,9 @@ export default function PunchPage() {
         {outcome.kind === "no-match" && (
           <div>
             <p className="text-xl font-semibold text-red-600">Not recognized</p>
-            <p className="text-sm text-gray-500">Best match {(outcome.score * 100).toFixed(0)}% — make sure this person is enrolled.</p>
+            <p className="text-sm text-gray-500">Best match {(outcome.score * 100).toFixed(0)}%.</p>
+            <p className="text-sm text-gray-600 mt-2">Move closer, face the camera, and make sure only one person is in the frame.</p>
+            <p className="text-xs text-gray-500 mt-1">Try better light, and remove a helmet or mask if it is safe to do so.</p>
           </div>
         )}
         {outcome.kind === "ambiguous" && (
@@ -285,6 +306,11 @@ export default function PunchPage() {
             </div>
           )}
           <p>Last sync: <span className="text-gray-600">{formatWhenAgo(lastSyncAt)}</span></p>
+          {!isOnline && (
+            <p className="rounded-md bg-amber-50 px-2 py-1.5 text-amber-800">
+              Offline — punches are saved on this phone and will sync automatically.
+            </p>
+          )}
         </div>
       </div>
     </div>
