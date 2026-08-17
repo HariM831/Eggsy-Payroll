@@ -63,8 +63,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Same APP_VERSION_CODE as the Gradle patch step below: vite.config.ts
+      # bakes it into the bundle as __APP_VERSION_CODE__, the fallback used
+      # when the native App plugin can't report a build number. Without it the
+      # bundle would say "build 1" while the APK says github.run_number, and a
+      # phone falling back to it would think an update is permanently pending.
       - name: Build web app (also copies face-recognition models into the bundle)
         run: npm run build
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
 
       - name: Add Android platform
         run: npx cap add android
@@ -74,6 +81,14 @@ jobs:
 
       - name: Pin signing to the committed debug keystore
         run: node scripts/patch-android-signing.mjs
+
+      # versionCode is fed from github.run_number (monotonic per repo run) so
+      # every build reports a distinct version; versionName comes from
+      # package.json. See scripts/patch-android-version.mjs.
+      - name: Patch Android versionCode/versionName
+        run: node scripts/patch-android-version.mjs
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
 
       - name: Sync web assets into the Android project
         run: npx cap sync android

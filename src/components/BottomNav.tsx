@@ -26,17 +26,6 @@ function IconCalendar() {
     </svg>
   );
 }
-function IconSettings() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="3" />
-      <path
-        strokeLinecap="round"
-        d="M19.4 13a7.97 7.97 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.9 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.5-1-2 3.5L6.4 11a7.97 7.97 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a8 8 0 0 0 1.7 1l.4 2.9h4l.4-2.9a8 8 0 0 0 1.7-1l2.5 1 2-3.5-2.1-1.6Z"
-      />
-    </svg>
-  );
-}
 function IconLock() {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
@@ -49,7 +38,6 @@ const TABS: { id: View; label: string; Icon: () => JSX.Element; guarded?: boolea
   { id: "punch", label: "Punch", Icon: IconCamera },
   { id: "employees", label: "Employees", Icon: IconUsers, guarded: true },
   { id: "calendar", label: "Calendar", Icon: IconCalendar, guarded: true },
-  { id: "settings", label: "Settings", Icon: IconSettings, guarded: true },
 ];
 
 export default function BottomNav({

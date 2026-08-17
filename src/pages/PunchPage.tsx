@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import CameraCapture, { type CaptureResult } from "../components/CameraCapture";
 import { listEmployees } from "../lib/employees";
 import { listPayrollEmployees } from "../lib/payrollEmployees";
 import { recordPunch, recordPayrollPunch } from "../lib/punches";
-import { syncSoon, syncPayrollSoon, getSyncStatus, getPayrollSyncStatus } from "../lib/sync";
+import { syncSoon, syncPayrollSoon, getSyncStatus, getPayrollSyncStatus, getDeviceConfig, getVersionInfo, VERSION_INFO_EVENT } from "../lib/sync";
+import { getAppVersion } from "../lib/device";
+import { PAIRING_CHANGE_EVENT } from "../lib/pairing";
 import { primeLocation, getCachedLocation } from "../lib/location";
 import { findBestMatchInGalleries, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchGallery } from "../lib/face";
 import { getAll } from "../lib/db";
@@ -50,7 +52,7 @@ function formatWhenAgo(ts: number | null): string {
   return new Date(ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function PunchPage() {
+export default function PunchPage({ onOpenSettings }: { onOpenSettings: () => void }) {
   const [wageEmployees, setWageEmployees] = useState<Employee[]>([]);
   const [payrollEmployees, setPayrollEmployees] = useState<PayrollEmployee[]>([]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
@@ -60,6 +62,48 @@ export default function PunchPage() {
   const [payrollPresent, setPayrollPresent] = useState(0);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  const [paired, setPaired] = useState(false);
+  const [update, setUpdate] = useState<{ latestVersionCode: number; apkUrl: string | null } | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      const config = await getDeviceConfig();
+      if (active) setPaired(!!config);
+    }
+    load();
+    const onChange = () => load();
+    window.addEventListener(PAIRING_CHANGE_EVENT, onChange);
+    return () => {
+      active = false;
+      window.removeEventListener(PAIRING_CHANGE_EVENT, onChange);
+    };
+  }, []);
+
+  // Update banner: compute once on mount AND on every version-info refresh so
+  // it doesn't wait out the first scheduler tick.
+  useEffect(() => {
+    let active = true;
+    async function compute() {
+      const [version, info] = await Promise.all([getAppVersion(), getVersionInfo()]);
+      if (!active) return;
+      if (info && info.latestVersionCode > version.versionCode) {
+        setUpdate({ latestVersionCode: info.latestVersionCode, apkUrl: info.apkUrl });
+      } else {
+        setUpdate(null);
+      }
+    }
+    compute();
+    const onVersion = () => compute();
+    window.addEventListener(VERSION_INFO_EVENT, onVersion);
+    return () => {
+      active = false;
+      window.removeEventListener(VERSION_INFO_EVENT, onVersion);
+    };
+  }, []);
 
   useEffect(() => {
     listEmployees().then(setWageEmployees);
@@ -196,13 +240,30 @@ export default function PunchPage() {
     setCaptureKey((k) => k + 1);
   }
 
+  // Hidden Settings entry point: a long-press (~800ms) on the Punch header.
+  // Settings is still PIN-gated via requestScreen("settings"), so this is not
+  // a bypass — just a way in without a visible Settings tab.
+  function startLongPress() {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => onOpenSettings(), 800);
+  }
+  function cancelLongPress() {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+  }
+
   const totalWage = wageEmployees.length;
   const totalPayroll = payrollEmployees.length;
 
   if (wageEmployees.length === 0 && payrollEmployees.length === 0) {
     return (
-      <div className="p-6 text-center text-gray-500">
-        No one enrolled yet. Add a wage worker from the Employees tab, or sync a payroll device token in Settings.
+      <div className="p-6 text-center text-gray-500 space-y-3">
+        <p>No one enrolled yet. Add a wage worker from the Employees tab, or pair this phone to pull payroll employees.</p>
+        {!paired && (
+          <button onClick={onOpenSettings} className="text-sm text-brand underline">
+            Pair this phone
+          </button>
+        )}
       </div>
     );
   }
@@ -284,8 +345,33 @@ export default function PunchPage() {
 
   return (
     <div className="flex flex-col min-h-full">
+      {update && !updateDismissed && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs px-4 py-2 flex items-center gap-2">
+          <span className="flex-1">
+            Update available — ask your supervisor.
+            {update.apkUrl && (
+              <a href={update.apkUrl} target="_blank" rel="noreferrer" className="underline ml-1">
+                Download
+              </a>
+            )}
+          </span>
+          <button onClick={() => setUpdateDismissed(true)} className="text-amber-600" aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 p-4 flex flex-col items-center gap-3">
-        <h1 className="text-lg font-semibold">Punch attendance</h1>
+        <div
+          className="select-none"
+          onPointerDown={startLongPress}
+          onPointerUp={cancelLongPress}
+          onPointerLeave={cancelLongPress}
+          onPointerCancel={cancelLongPress}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <h1 className="text-lg font-semibold">Punch attendance</h1>
+        </div>
         <CameraCapture key={captureKey} onCapture={handleCapture} captureLabel="Punch" />
       </div>
 
@@ -306,6 +392,13 @@ export default function PunchPage() {
             </div>
           )}
           <p>Last sync: <span className="text-gray-600">{formatWhenAgo(lastSyncAt)}</span></p>
+          {!paired && (
+            <p>
+              <button onClick={onOpenSettings} className="text-brand underline">
+                Pair this phone
+              </button>
+            </p>
+          )}
           {!isOnline && (
             <p className="rounded-md bg-amber-50 px-2 py-1.5 text-amber-800">
               Offline — punches are saved on this phone and will sync automatically.

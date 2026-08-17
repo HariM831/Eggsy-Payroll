@@ -15,6 +15,7 @@
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
 import { getAll, get, put, del, clear } from "./db";
 import { localDate } from "./id";
+import { getAppVersion } from "./device";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch, LastPunchToday, PunchType, PunchMethod } from "../types";
 import type { DayOverride } from "./attendance";
 import { saveBackup } from "./backup";
@@ -28,8 +29,39 @@ export const DEFAULT_SERVER_URL = "https://aminofarms.replit.app";
 // even with a valid token — going through the proxy keeps the request
 // same-origin in the browser, and the proxy strips Origin before
 // forwarding server-side. Production builds still call serverUrl directly.
-function apiBase(serverUrl: string): string {
+export function apiBase(serverUrl: string): string {
   return import.meta.env.DEV ? "" : serverUrl;
+}
+
+/** A 401 carrying { code: "device_revoked" } from any authenticated endpoint —
+ * the server has revoked this device's token. Distinct from a network error or
+ * any other 401 so a flaky connection can never unpair a working phone. */
+export class DeviceRevokedError extends Error {
+  constructor() {
+    super("Device revoked");
+    this.name = "DeviceRevokedError";
+  }
+}
+
+/** Dispatched on the window when the device has been revoked mid-sync, so the
+ * app can drop to the pairing state while keeping every local store. */
+export const DEVICE_REVOKED_EVENT = "device-revoked";
+/** Dispatched on the window after version info has been refreshed, so the
+ * update banner can re-evaluate without waiting out a scheduler tick. */
+export const VERSION_INFO_EVENT = "version-info-updated";
+
+/** fetch() wrapper for authenticated endpoints: passes the request through
+ * unchanged except that a revoked-device 401 is surfaced as a
+ * DeviceRevokedError. Callers still check `!res.ok` for everything else. */
+async function authedFetch(serverUrl: string, path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${apiBase(serverUrl)}${path}`, init);
+  if (res.status === 401) {
+    const body = await res.json().catch(() => null);
+    if (body && (body.code === "device_revoked" || body.error === "Device revoked")) {
+      throw new DeviceRevokedError();
+    }
+  }
+  return res;
 }
 
 interface DeviceConfig {
@@ -126,8 +158,17 @@ interface ServerWorker {
   createdAt: string;
 }
 
-export async function getDeviceInfo(serverUrl: string, token: string): Promise<{ deviceId: string; name: string }> {
-  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/info`, {
+export async function getDeviceInfo(
+  serverUrl: string,
+  token: string,
+): Promise<{
+  deviceId: string;
+  name: string;
+  latestVersionCode?: number;
+  minVersionCode?: number;
+  apkUrl?: string | null;
+}> {
+  const res = await authedFetch(serverUrl, "/api/wages/device-sync/info", {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -137,12 +178,71 @@ export async function getDeviceInfo(serverUrl: string, token: string): Promise<{
   return res.json();
 }
 
+// ── Update/version banner data ─────────────────────────────────────────────
+// The server tells us (on the existing device-sync/info endpoint) what the
+// newest build is, what the minimum still-supported build is, and where to
+// get the APK. Stored in meta so the Punch screen can compute the banner
+// from local state without a network round-trip on mount.
+
+interface VersionInfo {
+  key: "version-info";
+  latestVersionCode: number;
+  minVersionCode: number;
+  apkUrl: string | null;
+  fetchedAt: number;
+}
+
+export interface VersionInfoView {
+  latestVersionCode: number;
+  minVersionCode: number;
+  apkUrl: string | null;
+}
+
+export async function getVersionInfo(): Promise<VersionInfoView | null> {
+  const v = await get<VersionInfo>("meta", "version-info");
+  return v
+    ? { latestVersionCode: v.latestVersionCode, minVersionCode: v.minVersionCode, apkUrl: v.apkUrl }
+    : null;
+}
+
+/** Best-effort refresh of the update-banner numbers after a sync/info fetch.
+ * Never throws — a missing/older server just leaves the stored info stale. */
+async function refreshVersionInfo(): Promise<void> {
+  const config = await getDeviceConfig();
+  if (!config) return;
+  try {
+    const info = await getDeviceInfo(config.serverUrl, config.token);
+    await put<VersionInfo>("meta", {
+      key: "version-info",
+      latestVersionCode: info.latestVersionCode ?? 0,
+      minVersionCode: info.minVersionCode ?? 0,
+      apkUrl: info.apkUrl ?? null,
+      fetchedAt: Date.now(),
+    });
+    window.dispatchEvent(new Event(VERSION_INFO_EVENT));
+  } catch {
+    // best-effort — an old server or transient error just keeps the last values
+  }
+}
+
+/** Blocks sync (never punching) when the server has declared this build too
+ * old. Returns a user-facing reason, or null when sync may proceed. */
+async function tooOldToSync(): Promise<string | null> {
+  const info = await getVersionInfo();
+  if (!info || info.minVersionCode <= 0) return null;
+  const current = await getAppVersion();
+  if (info.minVersionCode > current.versionCode) {
+    return "This app version is too old to sync — update the phone. Punches are still saved locally.";
+  }
+  return null;
+}
+
 /** Read-only preview of how many workers exist on the server for a token,
  * WITHOUT writing anything locally — for showing "N workers will be
  * restored" before committing to a token switch. Uses the same roster
  * endpoint as pullWorkerRoster(); best-effort callers should catch. */
 export async function peekWorkerRosterCount(serverUrl: string, token: string): Promise<number> {
-  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/workers`, {
+  const res = await authedFetch(serverUrl, "/api/wages/device-sync/workers", {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -225,8 +325,9 @@ async function pullAttendanceHistory(serverUrl: string, token: string): Promise<
   const to = localDate();
   const from = localDate(new Date(Date.now() - (HISTORY_DAYS - 1) * 86_400_000));
 
-  const res = await fetch(
-    `${apiBase(serverUrl)}/api/wages/device-sync/punches?from=${from}&to=${to}`,
+  const res = await authedFetch(
+    serverUrl,
+    `/api/wages/device-sync/punches?from=${from}&to=${to}`,
     { headers: { Authorization: `Bearer ${token}` } },
   );
   if (!res.ok) {
@@ -294,7 +395,7 @@ async function pullAttendanceHistory(serverUrl: string, token: string): Promise<
  * push already succeeded, so callers swallow the error themselves.
  * Returns how many workers were written locally. */
 async function pullWorkerRoster(serverUrl: string, token: string): Promise<number> {
-  const res = await fetch(`${apiBase(serverUrl)}/api/wages/device-sync/workers`, {
+  const res = await authedFetch(serverUrl, "/api/wages/device-sync/workers", {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
@@ -379,6 +480,12 @@ export async function syncNow(): Promise<{
   const config = await getDeviceConfig();
   if (!config) return { ok: false, error: "No device token configured yet" };
 
+  const tooOld = await tooOldToSync();
+  if (tooOld) {
+    await setSyncStatus({ lastAttemptAt: Date.now(), lastError: tooOld });
+    return { ok: false, error: tooOld };
+  }
+
   syncing = true;
   await setSyncStatus({ lastAttemptAt: Date.now() });
   try {
@@ -431,7 +538,7 @@ export async function syncNow(): Promise<{
       })),
     };
 
-    const res = await fetch(`${apiBase(config.serverUrl)}/api/wages/sync`, {
+    const res = await authedFetch(config.serverUrl, "/api/wages/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
       body: JSON.stringify(payload),
@@ -470,6 +577,11 @@ export async function syncNow(): Promise<{
       restoredPunches: restored.punches,
     };
   } catch (err: any) {
+    if (err instanceof DeviceRevokedError) {
+      await clearDeviceConfig();
+      window.dispatchEvent(new Event(DEVICE_REVOKED_EVENT));
+      return { ok: false, error: "Device revoked" };
+    }
     const message = err?.message ?? String(err);
     await setSyncStatus({ lastError: message });
     return { ok: false, error: message };
@@ -543,12 +655,18 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
   const config = await getDeviceConfig(); // shared with Wages — see module comment above
   if (!config) return { ok: false, error: "No device token configured yet" };
 
+  const tooOld = await tooOldToSync();
+  if (tooOld) {
+    await setPayrollSyncStatus({ lastAttemptAt: Date.now(), lastError: tooOld });
+    return { ok: false, error: tooOld };
+  }
+
   payrollSyncing = true;
   await setPayrollSyncStatus({ lastAttemptAt: Date.now() });
   try {
     // Pull the roster first — the punch flow can't match a payroll
     // employee's face at all until it has descriptors to compare against.
-    const rosterRes = await fetch(`${apiBase(config.serverUrl)}/api/attendance-sync/employees`, {
+    const rosterRes = await authedFetch(config.serverUrl, "/api/attendance-sync/employees", {
       headers: { Authorization: `Bearer ${config.token}` },
     });
     if (!rosterRes.ok) {
@@ -577,7 +695,7 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
           accuracy: p.accuracy,
         })),
       };
-      const res = await fetch(`${apiBase(config.serverUrl)}/api/attendance-sync/punches`, {
+      const res = await authedFetch(config.serverUrl, "/api/attendance-sync/punches", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
         body: JSON.stringify(payload),
@@ -609,6 +727,11 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
     if (config.deviceId) saveBackup(config.deviceId);
     return { ok: true, synced: punches.length };
   } catch (err: any) {
+    if (err instanceof DeviceRevokedError) {
+      await clearDeviceConfig();
+      window.dispatchEvent(new Event(DEVICE_REVOKED_EVENT));
+      return { ok: false, error: "Device revoked" };
+    }
     const message = err?.message ?? String(err);
     await setPayrollSyncStatus({ lastError: message });
     return { ok: false, error: message };
@@ -657,6 +780,9 @@ function syncAllNow(): Promise<unknown> {
   return Promise.all([syncNow(), syncPayrollNow()]).then(async () => {
     const config = await getDeviceConfig();
     if (config?.deviceId) saveBackup(config.deviceId);
+    // Refresh update-banner numbers on the same cadence as the syncs, so the
+    // banner shows up as soon as the server knows a newer build exists.
+    refreshVersionInfo().catch(() => {});
   });
 }
 
