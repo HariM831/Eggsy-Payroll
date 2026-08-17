@@ -50,11 +50,38 @@ export const DEVICE_REVOKED_EVENT = "device-revoked";
  * update banner can re-evaluate without waiting out a scheduler tick. */
 export const VERSION_INFO_EVENT = "version-info-updated";
 
+// No request may run unbounded. On a slow/flaky connection an un-timed-out
+// fetch sits open holding memory (worse under CapacitorHttp, which marshals
+// the whole response across the JS<->native bridge as one string, and worse
+// again for the roster pulls below since those responses carry base64 photos
+// + face descriptors for every enrolled person) for as long as the
+// connection stays alive but stalled. That memory, stacked on top of the
+// face-recognition engine already running on the Punch screen, is what was
+// pushing the app over Android's per-process memory limit and getting it
+// OOM-killed — which shows up to the user as a plain force-quit, not a crash
+// dialog. A hard timeout turns a multi-minute stall into a normal, recoverable
+// "sync failed, try again" instead.
+const FETCH_TIMEOUT_MS = 20_000;
+
+/** fetch() with a hard timeout — the timeout fires an AbortError, which
+ * callers see as a normal network failure (same shape as offline/DNS
+ * failure), not a distinct error type to handle. */
+export async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** fetch() wrapper for authenticated endpoints: passes the request through
- * unchanged except that a revoked-device 401 is surfaced as a
- * DeviceRevokedError. Callers still check `!res.ok` for everything else. */
+ * unchanged (with a timeout — see fetchWithTimeout) except that a
+ * revoked-device 401 is surfaced as a DeviceRevokedError. Callers still
+ * check `!res.ok` for everything else. */
 async function authedFetch(serverUrl: string, path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${apiBase(serverUrl)}${path}`, init);
+  const res = await fetchWithTimeout(`${apiBase(serverUrl)}${path}`, init);
   if (res.status === 401) {
     const body = await res.json().catch(() => null);
     if (body && (body.code === "device_revoked" || body.error === "Device revoked")) {
@@ -773,17 +800,25 @@ function nextDelayMs(): number {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let started = false;
 
-/** Runs both sync scopes together — they share one device token (see module
- * comment above), so both fire once it's configured; before that, both are
- * cheap early-return no-ops. Saves a single backup after both complete. */
-function syncAllNow(): Promise<unknown> {
-  return Promise.all([syncNow(), syncPayrollNow()]).then(async () => {
-    const config = await getDeviceConfig();
-    if (config?.deviceId) saveBackup(config.deviceId);
-    // Refresh update-banner numbers on the same cadence as the syncs, so the
-    // banner shows up as soon as the server knows a newer build exists.
-    refreshVersionInfo().catch(() => {});
-  });
+/** Runs both sync scopes — they share one device token (see module comment
+ * above), so both fire once it's configured; before that, both are cheap
+ * early-return no-ops. Saves a single backup after both complete.
+ *
+ * Sequential, not Promise.all: both scopes pull a full roster with base64
+ * photos + face descriptors, and running them at once doubled the peak
+ * memory of an already-heavy moment (the face-recognition engine is also
+ * live on the Punch screen). On a slow connection that stacked pressure was
+ * enough to get the app OOM-killed. One at a time costs a little wall-clock
+ * time; it doesn't cost sync frequency, since each scope still runs at most
+ * once per scheduler tick either way. */
+async function syncAllNow(): Promise<void> {
+  await syncNow();
+  await syncPayrollNow();
+  const config = await getDeviceConfig();
+  if (config?.deviceId) saveBackup(config.deviceId);
+  // Refresh update-banner numbers on the same cadence as the syncs, so the
+  // banner shows up as soon as the server knows a newer build exists.
+  refreshVersionInfo().catch(() => {});
 }
 
 function scheduleNext() {

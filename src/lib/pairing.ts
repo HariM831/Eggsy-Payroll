@@ -8,6 +8,7 @@
 import {
   apiBase,
   DEFAULT_SERVER_URL,
+  fetchWithTimeout,
   getDeviceConfig,
   setDeviceConfig,
   clearDeviceConfig,
@@ -139,7 +140,7 @@ export async function claimPairingCode(rawCode: string): Promise<PairClaimResult
 
   let res: Response;
   try {
-    res = await fetch(`${apiBase(serverUrl)}/api/wages/devices/pair/claim`, {
+    res = await fetchWithTimeout(`${apiBase(serverUrl)}/api/wages/devices/pair/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -182,7 +183,7 @@ export async function pollPairing(pendingId: string): Promise<PairPollResult> {
 
   let res: Response;
   try {
-    res = await fetch(`${apiBase(serverUrl)}/api/wages/devices/pair/${encodeURIComponent(pendingId)}`);
+    res = await fetchWithTimeout(`${apiBase(serverUrl)}/api/wages/devices/pair/${encodeURIComponent(pendingId)}`);
   } catch (err: any) {
     return { status: "error", message: err?.message ?? String(err) };
   }
@@ -245,9 +246,14 @@ export async function applyPairingApproved(payload: {
   // the very end, so the app keeps showing the wait screen through the first
   // sync instead of flipping to the normal tree (and an empty roster) early.
   await clearPendingPairingInternal();
-  // Await both scopes so a replace restores wage workers AND the payroll
-  // roster before the app hands back to the Punch screen.
-  await Promise.all([syncNow(), syncPayrollNow()]);
+  // Await both scopes, one at a time (not Promise.all — see syncAllNow's
+  // comment in sync.ts), so a replace restores wage workers AND the payroll
+  // roster before the app hands back to the Punch screen. This is the
+  // heaviest possible restore (a full roster in each scope, first sync ever
+  // on this token), so running them concurrently here would be the worst
+  // place to double the peak memory.
+  await syncNow();
+  await syncPayrollNow();
   notifyPairingChanged();
 }
 
