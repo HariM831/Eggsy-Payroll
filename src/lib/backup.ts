@@ -5,6 +5,23 @@ import type { DayOverride } from './attendance';
 
 const BACKUP_DIRECTORY = Directory.Documents;
 
+// Android requires this permission on every fresh install — even reinstalling
+// the exact same signed build resets it, even though files written to
+// Directory.Documents by a previous install are still on disk. Without this,
+// reads/writes silently fail and the file looks "inaccessible" even though
+// it's really just unreadable until the user re-grants access.
+async function ensureStoragePermission(): Promise<boolean> {
+  try {
+    const status = await Filesystem.checkPermissions();
+    if (status.publicStorage === 'granted') return true;
+    const requested = await Filesystem.requestPermissions();
+    return requested.publicStorage === 'granted';
+  } catch {
+    // Web/other platforms without this permission model — nothing to request.
+    return true;
+  }
+}
+
 async function hashDeviceId(deviceId: string): Promise<string> {
   const msgBuffer = new TextEncoder().encode(deviceId);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
@@ -162,6 +179,8 @@ export interface BackupMetadata {
 export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
   if (!deviceId) return { exists: false, readable: false };
 
+  await ensureStoragePermission();
+
   const f = await fileExists(deviceId);
   if (!f.exists) return { exists: false, readable: false };
 
@@ -191,6 +210,8 @@ export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
 export async function saveBackup(deviceId: string): Promise<void> {
   if (!deviceId) return;
   try {
+    await ensureStoragePermission();
+
     const [employees, punches, overrides, payrollEmployees, payrollPunches, metaEntries] = await Promise.all([
       getAll<Employee>('employees'),
       getAll<Punch>('punches'),
@@ -249,6 +270,8 @@ export interface RestoreResult {
 
 export async function restoreFromBackup(deviceId: string): Promise<RestoreResult> {
   if (!deviceId) throw new Error("No device ID provided");
+
+  await ensureStoragePermission();
 
   const result = await tryReadBackupFile(deviceId);
 
