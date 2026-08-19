@@ -43,7 +43,15 @@ export async function loadFaceEngine(): Promise<any> {
         filter: { enabled: true, equalization: true },
         face: {
           enabled: true,
-          detector: { rotation: true, maxDetected: 5, minConfidence: 0.4 },
+          // The detector runs once, but mesh/description/antispoof/liveness
+          // then run PER detected face — so maxDetected multiplies the
+          // expensive half of every capture. At 5 it meant a rush-hour queue
+          // with people visible behind the person punching cost up to five
+          // times the model work and five times the tensors, on the slowest
+          // phone, at the busiest moment. Two keeps the largest-face guard
+          // below meaningful (that guard only matters when more than one face
+          // is found) while cutting the worst case by 60%.
+          detector: { rotation: true, maxDetected: 2, minConfidence: 0.4 },
           mesh: { enabled: true },
           iris: { enabled: false },
           emotion: { enabled: false },
@@ -77,28 +85,79 @@ export interface FaceResult {
   error?: string;
 }
 
+/** Human allocates a full set of tensors per detect() and frees them as the
+ * next one starts — so two overlapping detects hold two sets at once. That
+ * used to be reachable: the timeout below rejects, the capture button frees
+ * up, and the abandoned detect is still running when the next one begins. On
+ * a slow phone, where timeouts are exactly what happens, each one left its
+ * tensors live. Serialising detects removes the overlap entirely. */
+let detectInFlight: Promise<any> | null = null;
+
+/** Human hands back the input tensor on the result when one was allocated.
+ * Nothing downstream reads it — only the embedding is used — so release it
+ * rather than waiting for the next detect to do it. */
+function disposeResult(human: any, result: any): void {
+  try {
+    if (result?.tensor) human.tf.dispose(result.tensor);
+  } catch {
+    // never let cleanup fail a capture
+  }
+}
+
 export async function getFaceEmbedding(
   input: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement,
 ): Promise<FaceResult> {
   const human = await loadFaceEngine();
   const DETECT_TIMEOUT_MS = 10_000;
-  const result: any = await Promise.race([
-    human.detect(input),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Face detection timed out — try again")), DETECT_TIMEOUT_MS),
-    ),
-  ]);
+
+  // Wait out any previous detect — including one whose caller already gave up
+  // on it — before starting another. Its outcome is irrelevant here; what
+  // matters is that its tensors are gone before we allocate ours.
+  if (detectInFlight) await detectInFlight.catch(() => {});
+
+  const detect = human.detect(input);
+  // Tracks the detect to completion whether or not this caller still cares.
+  // Cleared only when detect() genuinely settles — NOT when the timeout
+  // fires — so a caller who gave up still makes the next one wait.
+  const tracked: Promise<void> = detect
+    .catch(() => {})
+    .finally(() => {
+      if (detectInFlight === tracked) detectInFlight = null;
+    });
+  detectInFlight = tracked;
+
+  let result: any;
+  try {
+    result = await Promise.race([
+      detect,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Face detection timed out — try again")), DETECT_TIMEOUT_MS),
+      ),
+    ]);
+  } catch (err) {
+    // Timed out. detect() carries on regardless — there is no way to cancel
+    // it — so release whatever it eventually produces rather than leaving it
+    // for the garbage collector to find.
+    detect.then((r: any) => disposeResult(human, r)).catch(() => {});
+    throw err;
+  }
+
   const faces = (result?.face || []).filter((f: any) => Array.isArray(f.embedding) && f.embedding.length > 0);
   if (faces.length === 0) {
+    disposeResult(human, result);
     return { ok: false, faceCount: 0, error: "No face detected" };
   }
   if (faces.length > 1) {
     faces.sort((a: any, b: any) => (b.box?.[2] || 0) * (b.box?.[3] || 0) - (a.box?.[2] || 0) * (a.box?.[3] || 0));
   }
   const face = faces[0];
+  // Array.from copies the embedding out, so nothing below still points into
+  // the result — safe to release it here rather than on the next capture.
+  const embedding = Array.from(face.embedding as number[]);
+  disposeResult(human, result);
   return {
     ok: true,
-    embedding: Array.from(face.embedding as number[]),
+    embedding,
     faceCount: faces.length,
     confidence: face.faceScore ?? face.score,
     real: typeof face.real === "number" ? face.real : undefined,
