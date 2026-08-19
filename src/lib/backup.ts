@@ -1,5 +1,5 @@
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
-import { getAll, put } from './db';
+import { getAll, getAllKeys, get, put } from './db';
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from '../types';
 import type { DayOverride } from './attendance';
 
@@ -207,8 +207,73 @@ export async function checkBackup(deviceId: string): Promise<BackupMetadata> {
   return meta;
 }
 
-export async function saveBackup(deviceId: string): Promise<void> {
-  if (!deviceId) return;
+// A backup is the most expensive thing this app does: every row in every
+// store serialised into one string, then PBKDF2 at 100,000 iterations, then
+// AES-GCM, then a file write. It used to run on every sync tick — which
+// during a rush window is every 10 seconds, on a 3GB phone, while people are
+// punching. Two gates now stand in front of it: a minimum interval, and a
+// cheap check for whether anything was actually added since last time. Both
+// are skippable with { force: true } for a deliberate, user-initiated backup.
+const BACKUP_MIN_INTERVAL_MS = 10 * 60_000;
+
+/** What the last backup covered. The fingerprint is row COUNTS per store,
+ * read via getAllKeys so it never loads a single photo or face descriptor.
+ * Counts catch what a backup exists to protect — punches and people that
+ * would otherwise be lost with the phone. They deliberately miss in-place
+ * edits to existing rows (a syncedAt stamp, say); those are not worth
+ * 100,000 rounds of PBKDF2, and the next real change picks them up anyway. */
+interface BackupStateMeta {
+  key: "backup-state";
+  at: number;
+  fingerprint: string;
+}
+
+async function backupFingerprint(): Promise<string> {
+  const counts = await Promise.all(
+    ['employees', 'punches', 'overrides', 'payrollEmployees', 'payrollPunches'].map(
+      async (store) => (await getAllKeys(store)).length,
+    ),
+  );
+  return counts.join('|');
+}
+
+let backupInFlight: Promise<void> | null = null;
+
+export function saveBackup(deviceId: string, opts?: { force?: boolean }): Promise<void> {
+  if (!deviceId) return Promise.resolve();
+  // Coalescing returns the in-flight promise, which covers a snapshot taken
+  // BEFORE this call. Fine for the scheduler; a forced backup waits its turn
+  // instead, so a user who asks for one gets their own data in it.
+  if (backupInFlight && !opts?.force) return backupInFlight;
+  const run = async () => {
+    if (backupInFlight) await backupInFlight.catch(() => {});
+    if (!(await backupIsDue(opts?.force))) return;
+    await doSaveBackup(deviceId);
+  };
+  // Clear the slot only if it is still ours: a forced backup queued behind an
+  // earlier one means the earlier promise settles while this one is the live
+  // entry, and an unconditional reset there would blank the guard and let a
+  // third caller run concurrently with this one.
+  const pending: Promise<void> = run().finally(() => {
+    if (backupInFlight === pending) backupInFlight = null;
+  });
+  backupInFlight = pending;
+  return pending;
+}
+
+async function backupIsDue(force?: boolean): Promise<boolean> {
+  if (force) return true;
+  try {
+    const state = await get<BackupStateMeta>('meta', 'backup-state');
+    if (state && Date.now() - state.at < BACKUP_MIN_INTERVAL_MS) return false;
+    if (state && (await backupFingerprint()) === state.fingerprint) return false;
+    return true;
+  } catch {
+    return true; // can't tell — err towards backing up
+  }
+}
+
+async function doSaveBackup(deviceId: string): Promise<void> {
   try {
     await ensureStoragePermission();
 
@@ -254,6 +319,14 @@ export async function saveBackup(deviceId: string): Promise<void> {
       encoding: Encoding.UTF8,
     });
     console.log(`Encrypted backup saved to ${path}`);
+
+    // Only after the file is actually on disk — a failed write must not look
+    // like a recent backup, or the gates above would suppress the retry.
+    await put<BackupStateMeta>('meta', {
+      key: 'backup-state',
+      at: Date.now(),
+      fingerprint: await backupFingerprint(),
+    });
   } catch (e) {
     console.error("Failed to save encrypted backup:", e);
   }

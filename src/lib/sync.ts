@@ -13,7 +13,7 @@
 // reinstalled app / replacement phone can restore itself by re-entering the
 // same token instead of every worker being re-enrolled by hand. See
 // server/routes/wages.ts on the Amino Farms side for the receiving end.
-import { getAll, get, put, del, clear } from "./db";
+import { getAll, getAllKeys, get, put, del, clear } from "./db";
 import { localDate } from "./id";
 import { getAppVersion } from "./device";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch, LastPunchToday, PunchType, PunchMethod } from "../types";
@@ -62,6 +62,20 @@ export const VERSION_INFO_EVENT = "version-info-updated";
 // dialog. A hard timeout turns a multi-minute stall into a normal, recoverable
 // "sync failed, try again" instead.
 const FETCH_TIMEOUT_MS = 20_000;
+
+/** This app is offline most of the time by design, and during a rush window
+ * the scheduler ticks every 10 seconds — so without this check a phone with
+ * no signal spends the whole shift opening requests that cannot succeed,
+ * each one able to hold memory for the full FETCH_TIMEOUT_MS above on a
+ * connection that is present but not working (weak signal, captive wifi).
+ * Bailing out costs nothing and writes nothing: punches are already saved
+ * locally, the Punch screen has its own offline indicator, and the "online"
+ * listener in startAutoSync re-runs everything the moment signal returns. */
+const OFFLINE_ERROR = "Offline — punches are saved locally";
+
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
 
 /** fetch() with a hard timeout — the timeout fires an AbortError, which
  * callers see as a normal network failure (same shape as offline/DNS
@@ -235,6 +249,7 @@ export async function getVersionInfo(): Promise<VersionInfoView | null> {
 /** Best-effort refresh of the update-banner numbers after a sync/info fetch.
  * Never throws — a missing/older server just leaves the stored info stale. */
 async function refreshVersionInfo(): Promise<void> {
+  if (isOffline()) return;
   const config = await getDeviceConfig();
   if (!config) return;
   try {
@@ -434,27 +449,48 @@ async function pullWorkerRoster(serverUrl: string, token: string): Promise<numbe
   const localById = new Map((await getAll<Employee>("employees")).map((e) => [e.id, e]));
   // A local row with no syncedAt is a pending local edit (new enrollment or
   // an edit not yet pushed) — the pull must never clobber it.
-  const toWrite = serverWorkers.filter((w) => {
+  const toWrite: (ServerWorker | null)[] = serverWorkers.filter((w) => {
     const local = localById.get(w.id);
     return !local || local.syncedAt;
   });
 
+  // Once the filter above has run, the raw parsed array's direct references
+  // are redundant — everything we still care about is referenced by toWrite.
+  // Drop them so nulling toWrite entries below actually frees the base64
+  // photo strings rather than leaving them pinned by serverWorkers.
+  serverWorkers.length = 0;
+
   const pulledAt = Date.now();
-  await Promise.all(
-    toWrite.map((w) =>
-      put<Employee>("employees", {
-        id: w.id,
-        name: w.name,
-        aadharNumber: w.aadharNumber,
-        photoDataUrl: w.photoDataUrl,
-        faceDescriptor: w.faceDescriptor,
-        role: w.role,
-        isActive: w.isActive,
-        createdAt: new Date(w.createdAt).getTime(),
-        syncedAt: pulledAt, // pulled from the server, so already synced by definition
-      }),
-    ),
-  );
+  // Write in small chunks (and drop each chunk's references as it completes)
+  // instead of one Promise.all over the whole roster, so the base64 photos
+  // never all need to be held live at once while the face-recognition engine
+  // is also running on the Punch screen.
+  const CHUNK_SIZE = 20;
+  for (let i = 0; i < toWrite.length; i += CHUNK_SIZE) {
+    // Safe cast: only entries BEFORE i are nulled, and slices only move forward.
+    const chunk = toWrite.slice(i, i + CHUNK_SIZE) as ServerWorker[];
+    await Promise.all(
+      chunk.map((w) =>
+        put<Employee>("employees", {
+          id: w.id,
+          name: w.name,
+          aadharNumber: w.aadharNumber,
+          photoDataUrl: w.photoDataUrl,
+          faceDescriptor: w.faceDescriptor,
+          role: w.role,
+          isActive: w.isActive,
+          createdAt: new Date(w.createdAt).getTime(),
+          syncedAt: pulledAt, // pulled from the server, so already synced by definition
+        }),
+      ),
+    );
+    // Release this chunk's entries so the GC can reclaim their base64 photo
+    // strings mid-loop instead of keeping every worker's photo alive until
+    // the whole roster is written.
+    for (let j = i; j < Math.min(i + CHUNK_SIZE, toWrite.length); j++) {
+      toWrite[j] = null;
+    }
+  }
   return toWrite.length;
 }
 
@@ -494,7 +530,7 @@ async function restoreFromServer(
   return restored;
 }
 
-export async function syncNow(): Promise<{
+export async function syncNow(opts?: { pushOnly?: boolean }): Promise<{
   ok: boolean;
   error?: string;
   synced?: number;
@@ -504,6 +540,7 @@ export async function syncNow(): Promise<{
   restoredPunches?: number;
 }> {
   if (syncing) return { ok: false, error: "Sync already in progress" };
+  if (isOffline()) return { ok: false, error: OFFLINE_ERROR };
   const config = await getDeviceConfig();
   if (!config) return { ok: false, error: "No device token configured yet" };
 
@@ -525,11 +562,19 @@ export async function syncNow(): Promise<{
     const nothingPending = employees.length === 0 && punches.length === 0 && overrides.length === 0;
     const rolesCached = (await getCachedRoles()).length > 0;
     if (nothingPending && rolesCached) {
+      // A punch-triggered sync only needs to push, never pull — the roster
+      // restore below is a reinstall / replacement-phone recovery feature
+      // with no reason to run on a punch. Nothing pending and nothing to
+      // pull means this call reaches the network not at all, so it must NOT
+      // stamp lastSuccessAt: that field drives the "last synced" time on the
+      // Punch screen, and a sync that contacted nobody proves nothing about
+      // connectivity. Leaving it alone keeps the displayed time honest —
+      // the scheduler's own tick is what refreshes it.
+      if (opts?.pushOnly) return { ok: true, synced: 0 };
       // Nothing to push, but still restore in case this is a reinstalled /
       // replacement device that needs its workers and history back.
       const restored = await restoreFromServer(config.serverUrl, config.token, config.deviceId);
       await setSyncStatus({ lastSuccessAt: Date.now(), lastError: null });
-      if (config.deviceId) saveBackup(config.deviceId);
       return { ok: true, synced: 0, restored: restored.workers, restoredPunches: restored.punches };
     }
 
@@ -592,11 +637,14 @@ export async function syncNow(): Promise<{
     // history) only AFTER the push, so anything pending locally reaches the
     // server before the server's copy is read back. A no-op on a normal
     // device; on a reinstalled app / replacement phone it repopulates
-    // everything. Best-effort — see restoreFromServer.
-    const restored = await restoreFromServer(config.serverUrl, config.token, config.deviceId);
+    // everything. Best-effort — see restoreFromServer. Skipped on a
+    // punch-triggered (push-only) sync, which must never pull the roster.
+    let restored: { workers: number; punches: number; overrides: number } = { workers: 0, punches: 0, overrides: 0 };
+    if (!opts?.pushOnly) {
+      restored = await restoreFromServer(config.serverUrl, config.token, config.deviceId);
+    }
 
     await setSyncStatus({ lastSuccessAt: now, lastError: null });
-    if (config.deviceId) saveBackup(config.deviceId);
     return {
       ok: true,
       synced: employees.length + punches.length + overrides.length,
@@ -620,7 +668,7 @@ export async function syncNow(): Promise<{
 /** Fire-and-forget — call after a punch/enrollment so it shows up centrally
  * quickly without waiting for the next scheduled tick. Never throws. */
 export function syncSoon(): void {
-  syncNow().catch(() => {});
+  syncNow({ pushOnly: true }).catch(() => {});
 }
 
 // ── Payroll (salaried employee) sync ────────────────────────────────────────
@@ -675,10 +723,107 @@ interface RosterEmployee {
   lastPunchToday?: LastPunchToday | null;
 }
 
+/** `?mode=status` shape: the cheap half of the roster — who exists and where
+ * each person stands today, with none of the face data. See
+ * buildGateEmployeeStatusPayload() in the Amino Farms server. */
+interface RosterStatusEntry {
+  id: string;
+  lastPunchToday?: LastPunchToday | null;
+}
+
+/** Remembers when the heavy (face-descriptor) roster was last pulled, so it
+ * can be skipped on the ticks in between. */
+interface FullRosterPulledFlag {
+  key: "payroll-roster-pulled";
+  at: number;
+}
+
+// The roster splits into two halves that are needed at completely different
+// rates. lastPunchToday decides whether the next punch is IN or OUT
+// (nextPayrollPunchType() in punches.ts) and goes stale the moment someone
+// punches at the browser kiosk or another phone — so it has to ride every
+// tick, which during a rush window is every 10 seconds. The face descriptors
+// and recent embeddings only change when HR enrols or re-enrols someone, yet
+// they are almost the entire payload; pulling them every 10 seconds while the
+// face-recognition engine is live on the Punch screen is what was pushing the
+// app over Android's per-process memory limit and getting it OOM-killed.
+// So: `?mode=status` every tick (a few KB), the full roster only when it can
+// actually have changed.
+const FULL_ROSTER_MAX_AGE_MS = 10 * 60_000;
+
+/** The cheap pull: who exists and where each person stands today. */
+async function pullPayrollRosterStatus(serverUrl: string, token: string): Promise<RosterStatusEntry[]> {
+  const res = await authedFetch(serverUrl, "/api/attendance-sync/employees?mode=status", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Roster status responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  return res.json();
+}
+
+/** The expensive pull: identity plus every face descriptor and recent
+ * embedding. Stamps the flag that keeps it off the next several ticks. */
+async function pullPayrollRosterFull(serverUrl: string, token: string, now: number): Promise<void> {
+  const res = await authedFetch(serverUrl, "/api/attendance-sync/employees", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Roster fetch responded ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const roster: RosterEmployee[] = await res.json();
+  await Promise.all(
+    roster.map((e) => put<PayrollEmployee>("payrollEmployees", { ...e, cachedAt: now })),
+  );
+  await put<FullRosterPulledFlag>("meta", { key: "payroll-roster-pulled", at: now });
+}
+
+/** Fold a status response into the rows already stored. Merges field by
+ * field and never replaces a row wholesale: the status payload carries no
+ * face data, so writing it over the local row would wipe the descriptors
+ * this device needs to recognise anyone. One row at a time, and only when
+ * the value actually changed, so a quiet tick costs no writes at all. */
+async function mergeRosterStatus(status: RosterStatusEntry[]): Promise<void> {
+  for (const entry of status) {
+    const local = await get<PayrollEmployee>("payrollEmployees", entry.id);
+    if (!local) continue; // unknown id forces a full pull instead — see below
+    const next = entry.lastPunchToday ?? null;
+    const prev = local.lastPunchToday ?? null;
+    if (prev?.timestamp === next?.timestamp && prev?.punchType === next?.punchType) continue;
+    await put<PayrollEmployee>("payrollEmployees", { ...local, lastPunchToday: next });
+  }
+}
+
+/** Status every tick, full roster only when it can actually have changed —
+ * see the FULL_ROSTER_MAX_AGE_MS comment above for why the two halves are
+ * pulled at different rates. */
+async function refreshPayrollRoster(serverUrl: string, token: string, now: number): Promise<void> {
+  const localIds = await getAllKeys("payrollEmployees");
+  const flag = await get<FullRosterPulledFlag>("meta", "payroll-roster-pulled");
+  const fullDue = localIds.length === 0 || !flag || now - flag.at > FULL_ROSTER_MAX_AGE_MS;
+
+  if (!fullDue) {
+    const status = await pullPayrollRosterStatus(serverUrl, token);
+    const known = new Set(localIds.map(String));
+    // A face this device has never seen can't be matched at all, so someone
+    // newly enrolled is the one thing that pulls the heavy half in early
+    // rather than waiting out the interval.
+    if (!status.some((e) => !known.has(e.id))) {
+      await mergeRosterStatus(status);
+      return;
+    }
+  }
+
+  await pullPayrollRosterFull(serverUrl, token, now);
+}
+
 let payrollSyncing = false;
 
-export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; synced?: number }> {
+export async function syncPayrollNow(opts?: { pushOnly?: boolean }): Promise<{ ok: boolean; error?: string; synced?: number }> {
   if (payrollSyncing) return { ok: false, error: "Sync already in progress" };
+  if (isOffline()) return { ok: false, error: OFFLINE_ERROR };
   const config = await getDeviceConfig(); // shared with Wages — see module comment above
   if (!config) return { ok: false, error: "No device token configured yet" };
 
@@ -691,20 +836,14 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
   payrollSyncing = true;
   await setPayrollSyncStatus({ lastAttemptAt: Date.now() });
   try {
-    // Pull the roster first — the punch flow can't match a payroll
-    // employee's face at all until it has descriptors to compare against.
-    const rosterRes = await authedFetch(config.serverUrl, "/api/attendance-sync/employees", {
-      headers: { Authorization: `Bearer ${config.token}` },
-    });
-    if (!rosterRes.ok) {
-      const body = await rosterRes.text().catch(() => "");
-      throw new Error(`Roster fetch responded ${rosterRes.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-    }
-    const roster: RosterEmployee[] = await rosterRes.json();
     const now = Date.now();
-    await Promise.all(
-      roster.map((e) => put<PayrollEmployee>("payrollEmployees", { ...e, cachedAt: now })),
-    );
+    // Refresh the roster first — the punch flow can't match a payroll
+    // employee's face at all until it has descriptors to compare against.
+    // Skipped entirely on a punch-triggered (push-only) sync: a punch only
+    // needs to push the punch it just recorded, never re-read the roster.
+    if (!opts?.pushOnly) {
+      await refreshPayrollRoster(config.serverUrl, config.token, now);
+    }
 
     const punches = await getUnsyncedPayrollPunches();
     if (punches.length > 0) {
@@ -751,7 +890,6 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
     }
 
     await setPayrollSyncStatus({ lastSuccessAt: now, lastError: null });
-    if (config.deviceId) saveBackup(config.deviceId);
     return { ok: true, synced: punches.length };
   } catch (err: any) {
     if (err instanceof DeviceRevokedError) {
@@ -770,7 +908,7 @@ export async function syncPayrollNow(): Promise<{ ok: boolean; error?: string; s
 /** Fire-and-forget — call after a payroll punch so it shows up centrally
  * quickly without waiting for the next scheduled tick. Never throws. */
 export function syncPayrollSoon(): void {
-  syncPayrollNow().catch(() => {});
+  syncPayrollNow({ pushOnly: true }).catch(() => {});
 }
 
 // ── Adaptive scheduler ──────────────────────────────────────────────────────

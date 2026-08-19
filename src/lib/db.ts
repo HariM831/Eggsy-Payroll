@@ -13,7 +13,8 @@
 //   meta             — keyPath "key", arbitrary settings (PIN hash, sync config, etc.)
 
 const DB_NAME = "niko-payroll";
-const DB_VERSION = 2;
+// v3 adds the "byDate" indexes — see the upgrade block below.
+const DB_VERSION = 3;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -44,6 +45,21 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "key" });
+      }
+
+      // v3: "byDate" on both punch stores. The Punch screen needs today's
+      // punches after every capture (present-count, duplicate guard) and was
+      // reading the whole store — every punch ever taken — to do it. On a
+      // low-end phone that scan runs while the camera and face engine are
+      // live, which is exactly when there is no memory to spare. Added
+      // outside the create-if-missing blocks above so existing installs pick
+      // it up on upgrade, not just fresh ones.
+      const upgradeTx = req.transaction!;
+      for (const name of ["punches", "payrollPunches"]) {
+        const store = upgradeTx.objectStore(name);
+        if (!store.indexNames.contains("byDate")) {
+          store.createIndex("byDate", "punchDate", { unique: false });
+        }
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -83,6 +99,16 @@ export async function getAll<T>(storeName: string): Promise<T[]> {
   const db = await openDb();
   const store = db.transaction(storeName, "readonly").objectStore(storeName);
   return reqToPromise(store.getAll());
+}
+
+/** Keys only — no values. For "does this store have rows, and which ids?"
+ * checks on stores whose rows are large (payrollEmployees carries a face
+ * descriptor and up to a week of embeddings each), where getAll() would pull
+ * all of that into memory just to count. */
+export async function getAllKeys(storeName: string): Promise<IDBValidKey[]> {
+  const db = await openDb();
+  const store = db.transaction(storeName, "readonly").objectStore(storeName);
+  return reqToPromise(store.getAllKeys());
 }
 
 export async function get<T>(storeName: string, key: IDBValidKey): Promise<T | undefined> {

@@ -8,7 +8,7 @@ import { getAppVersion } from "../lib/device";
 import { PAIRING_CHANGE_EVENT } from "../lib/pairing";
 import { primeLocation, getCachedLocation } from "../lib/location";
 import { findBestMatchInGalleries, DEFAULT_MATCH_THRESHOLD, MIN_MATCH_MARGIN, type MatchGallery } from "../lib/face";
-import { getAll } from "../lib/db";
+import { getByIndex } from "../lib/db";
 import { localDate } from "../lib/id";
 import type { Employee, Punch, PayrollEmployee, PayrollPunch } from "../types";
 
@@ -132,17 +132,20 @@ export default function PunchPage({ onOpenSettings }: { onOpenSettings: () => vo
 
   async function loadStats() {
     const today = localDate();
-    const [allWagePunches, allPayrollPunches, wagesSync, payrollSync] = await Promise.all([
-      getAll<Punch>("punches"),
-      getAll<PayrollPunch>("payrollPunches"),
+    // Today's rows only, via the byDate index — this re-runs after every
+    // punch, and reading the whole punch history to count today's is the
+    // kind of thing that gets a 3GB phone OOM-killed mid-capture.
+    const [todayWagePunches, todayPayrollPunches, wagesSync, payrollSync] = await Promise.all([
+      getByIndex<Punch>("punches", "byDate", today),
+      getByIndex<PayrollPunch>("payrollPunches", "byDate", today),
       getSyncStatus(),
       getPayrollSyncStatus(),
     ]);
 
-    const wageIds = new Set(allWagePunches.filter(p => p.punchDate === today).map(p => p.employeeId));
+    const wageIds = new Set(todayWagePunches.map(p => p.employeeId));
     setWagePresent(wageIds.size);
 
-    const payrollIds = new Set(allPayrollPunches.filter(p => p.punchDate === today).map(p => p.employeeId));
+    const payrollIds = new Set(todayPayrollPunches.map(p => p.employeeId));
     setPayrollPresent(payrollIds.size);
 
     const times = [wagesSync.lastSuccessAt, payrollSync.lastSuccessAt].filter(Boolean) as number[];
@@ -178,16 +181,15 @@ export default function PunchPage({ onOpenSettings }: { onOpenSettings: () => vo
 
     // ── Duplicate punch guard ────────────────────────────────────
     const today = localDate();
+    // Only this worker's punches for today, straight off the byEmployeeDate
+    // index — the guard only ever looks at their most recent punch, so
+    // loading every punch in the store to find it was pure waste at the
+    // worst possible moment (camera + face engine still live).
     const [wagePunches, payrollPunches] = await Promise.all([
-      getAll<Punch>("punches"),
-      getAll<PayrollPunch>("payrollPunches"),
+      getByIndex<Punch>("punches", "byEmployeeDate", [match.id, today]),
+      getByIndex<PayrollPunch>("payrollPunches", "byEmployeeDate", [match.id, today]),
     ]);
-    const allTodayPunches = [
-      ...wagePunches.filter(p => p.punchDate === today),
-      ...payrollPunches.filter(p => p.punchDate === today),
-    ];
-    const lastForWorker = allTodayPunches
-      .filter(p => p.employeeId === match.id)
+    const lastForWorker = [...wagePunches, ...payrollPunches]
       .sort((a, b) => b.timestamp - a.timestamp)[0];
     if (lastForWorker) {
       const ago = Date.now() - lastForWorker.timestamp;
