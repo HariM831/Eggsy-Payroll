@@ -912,12 +912,14 @@ export function syncPayrollSoon(): void {
 }
 
 // ── Adaptive scheduler ──────────────────────────────────────────────────────
-// Frequent (every 10s) during shift-start/shift-end rush windows when many
-// workers are punching in quick succession and near-live visibility matters;
-// spaced out (every 5 min) the rest of the time to save battery/data.
+// Frequent (every 10s) during the windows when many workers are punching in
+// quick succession and near-live visibility matters; spaced out (every 5 min)
+// the rest of the time to save battery/data. Morning arrival, the lunch
+// break, and evening departure — the three times a queue forms at the phone.
 const RUSH_WINDOWS: [number, number, number, number][] = [
-  [7, 45, 8, 30],
-  [16, 45, 17, 30],
+  [7, 0, 10, 0],
+  [12, 0, 14, 0],
+  [16, 0, 18, 0],
 ];
 const RUSH_INTERVAL_MS = 10_000;
 const IDLE_INTERVAL_MS = 5 * 60_000;
@@ -931,8 +933,37 @@ function isRushWindow(d: Date): boolean {
   });
 }
 
+// Backoff for a connection that is present but not working — weak signal, a
+// captive wifi portal, a server that is down. navigator.onLine still reports
+// true in all of those, so the offline check above never fires and every tick
+// spends the full FETCH_TIMEOUT_MS failing. During a rush window that is one
+// doomed 20-second attempt every 10 seconds, for as long as the signal stays
+// bad. Each consecutive failed tick doubles the wait; the first success puts
+// it straight back to the normal cadence.
+//
+// Capped at the idle interval, deliberately: backoff can slow a rush window
+// down to the everyday rate but can never make the app sync LESS often than
+// it already does when things are quiet. The worst case is today's behaviour.
+//
+// This only paces the TIMER. It does not touch syncSoon()/syncPayrollSoon(),
+// so a punch still pushes the moment it is recorded no matter how far the
+// scheduler has backed off — and it does not touch the local save, which
+// happens before any of this is reached.
+const MAX_BACKOFF_MS = IDLE_INTERVAL_MS;
+const MAX_FAILURE_EXPONENT = 8; // 2**8 — beyond this the cap has long since won
+let consecutiveFailures = 0;
+
 function nextDelayMs(): number {
-  return isRushWindow(new Date()) ? RUSH_INTERVAL_MS : IDLE_INTERVAL_MS;
+  const base = isRushWindow(new Date()) ? RUSH_INTERVAL_MS : IDLE_INTERVAL_MS;
+  if (consecutiveFailures === 0) return base;
+  const backedOff = base * 2 ** Math.min(consecutiveFailures, MAX_FAILURE_EXPONENT);
+  return Math.min(backedOff, MAX_BACKOFF_MS);
+}
+
+/** Exposed for the diagnostics panel — how many scheduler ticks have failed
+ * back to back, and what the next wait will be. */
+export function getBackoffState(): { consecutiveFailures: number; nextDelayMs: number } {
+  return { consecutiveFailures, nextDelayMs: nextDelayMs() };
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -950,8 +981,18 @@ let started = false;
  * time; it doesn't cost sync frequency, since each scope still runs at most
  * once per scheduler tick either way. */
 async function syncAllNow(): Promise<void> {
-  await syncNow();
-  await syncPayrollNow();
+  const wages = await syncNow();
+  const payroll = await syncPayrollNow();
+
+  // One scope succeeding is enough to call the connection healthy — the two
+  // hit different endpoints and can fail independently, so demanding both
+  // would keep backing off over a fault on one side while the other is fine.
+  if (wages.ok || payroll.ok) {
+    consecutiveFailures = 0;
+  } else {
+    consecutiveFailures = Math.min(consecutiveFailures + 1, MAX_FAILURE_EXPONENT);
+  }
+
   const config = await getDeviceConfig();
   if (config?.deviceId) saveBackup(config.deviceId);
   // Refresh update-banner numbers on the same cadence as the syncs, so the
@@ -963,8 +1004,18 @@ function scheduleNext() {
   if (timer) clearTimeout(timer);
   timer = setTimeout(async () => {
     await syncAllNow();
-    scheduleNext(); // recomputed each tick so crossing a rush-window boundary re-paces immediately
+    scheduleNext(); // recomputed each tick so crossing a rush-window boundary — or clearing a backoff — re-paces immediately
   }, nextDelayMs());
+}
+
+/** Runs a sync outside the timer (signal returned, app reopened) and then
+ * re-arms the timer from the result. Without the re-arm, a phone that had
+ * backed off to the 5-minute cap would sync once on reconnect and then sit
+ * out the rest of the old long wait, even though the connection is healthy
+ * again and the counter has already been cleared. */
+async function syncAllNowAndReschedule(): Promise<void> {
+  await syncAllNow();
+  scheduleNext(); // clears the pending timer first, so this never double-schedules
 }
 
 /** Call once, on app start. Safe to call more than once — no-ops after the first. */
@@ -972,8 +1023,8 @@ export function startAutoSync(): void {
   if (started) return;
   started = true;
   scheduleNext();
-  window.addEventListener("online", () => syncAllNow());
+  window.addEventListener("online", () => { syncAllNowAndReschedule().catch(() => {}); });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") syncAllNow();
+    if (document.visibilityState === "visible") syncAllNowAndReschedule().catch(() => {});
   });
 }
